@@ -1,142 +1,199 @@
 # open-stock-data
 
-Core library for stock/crypto data with multi-source failover.
+`open-stock-data` 是一个面向股票、指数、加密货币和财经新闻的数据工具库。项目以普通 Python 函数形式提供 43 个工具，覆盖 A 股、港股、美股、ETF、A 股指数、OKX、Binance 和财经新闻，并在多类行情/财务数据上内置多数据源故障转移。
 
-Provides 43 tool functions for A-stock, HK, US stock, and crypto data with automatic failover across 6 data sources.
-
-## Install
+## 安装
 
 ```bash
 pip install open-stock-data
 ```
 
-## Usage
+## 快速使用
 
 ```python
-from open_stock_data.tools import stock_prices, get_current_time
+from open_stock_data.tools import get_current_time, stock_prices, stock_realtime
 
-# Get stock prices
-print(stock_prices(symbol="600519", market="sh", limit=5))
-
-# Get current time
 print(get_current_time())
-```
-
-## Supported Symbol Formats
-
-The tools normalize common stock-code inputs before routing. This is especially important for `stock_prices`, `stock_realtime`, `stock_info`, and `stock_indicators`.
-
-- A股个股: `600519`, `000001`, `sh600519`, `sz000001`, `600519.SH`, `000001.SZ`
-- ETF: `510300`, `159001`, `sh510300`, `sz159001`, `510300.SH`, `159001.SZ`
-- 港股: `01810`, `1810`, `HK01810`, `01810.HK`, `1810.hk`
-- 美股: `AAPL`, `MSFT`, `BRK.B`
-
-Notes:
-
-- 港股工具会将以上输入统一标准化为内部 5 位纯数字代码，例如 `01810.HK` -> `01810`
-- A股/ETF 工具会将带市场前缀或后缀的代码统一标准化为 6 位纯数字代码，例如 `sh600519` -> `600519`
-- 美股代码会统一转为大写，例如 `brk.b` -> `BRK.B`
-- 尚未专门支持 `SHSE.600519`、`SZSE.159001` 这类交易所前缀格式
-
-Example:
-
-```python
-from open_stock_data.tools import stock_prices, stock_realtime, stock_indicators
-
+print(stock_prices(symbol="600519", market="sh", limit=5))
 print(stock_realtime(symbol="01810.HK", market="hk"))
-print(stock_prices(symbol="sh600519", market="sh", limit=5))
-print(stock_indicators(symbol="BRK.B", market="us"))
 ```
 
-## Environment Variables
+工具函数返回文本结果，表格类数据通常以 CSV 形式输出，便于直接展示、写入文件或交给上层应用继续处理。
 
-| Variable | Purpose |
-|----------|---------|
-| `TUSHARE_TOKEN` | Tushare API token (enables Priority 0 A-share source) |
-| `ALPHA_VANTAGE_API_KEY` | Alpha Vantage API key (enables Priority 4 US stock data) |
-| `OKX_BASE_URL` | Custom OKX API proxy endpoint |
-| `BINANCE_BASE_URL` | Custom Binance API proxy endpoint |
-| `NEWSNOW_CHANNELS` | Comma-separated news source channels |
-| `ENABLE_EASTMONEY_PATCH` | Set to `true` to inject randomized User-Agent and `nid18` token for Eastmoney requests when Eastmoney endpoints are being rate-limited |
+## 支持的代码格式
 
-## Eastmoney Rate-Limit Patch
+工具会在内部对常见股票代码格式做标准化，主要影响 `stock_prices`、`stock_realtime`、`stock_info`、`stock_indicators` 等函数。
 
-If Eastmoney endpoints fail frequently with errors such as `RemoteDisconnected`, connection closed, or abrupt resets, you can enable a built-in patch:
+| 市场 | 支持示例 |
+| --- | --- |
+| A 股个股 | `600519`, `000001`, `sh600519`, `sz000001`, `600519.SH`, `000001.SZ` |
+| ETF | `510300`, `159001`, `sh510300`, `sz159001`, `510300.SH`, `159001.SZ` |
+| 港股 | `01810`, `1810`, `HK01810`, `01810.HK`, `1810.hk` |
+| 美股 | `AAPL`, `MSFT`, `BRK.B` |
+| 加密货币 | `BTC`, `ETH`, `BTC-USDT` |
+
+说明：
+
+- A 股和 ETF 会标准化为 6 位代码，例如 `sh600519` -> `600519`。
+- 港股会标准化为 5 位代码，例如 `1810.hk` -> `01810`。
+- 美股代码会转为大写，例如 `brk.b` -> `BRK.B`。
+- 暂未专门支持 `SHSE.600519`、`SZSE.159001` 这类交易所前缀格式。
+
+## 环境变量
+
+大多数基础行情可直接使用。部分增强数据源或自定义代理需要通过环境变量配置。
+
+| 变量 | 说明 |
+| --- | --- |
+| `TUSHARE_TOKEN` | Tushare Pro token。配置后启用 Tushare A 股数据源。 |
+| `ALPHA_VANTAGE_API_KEY` | Alpha Vantage API key。配置后启用部分美股新闻、技术指标和财务数据增强能力。 |
+| `OKX_BASE_URL` | 自定义 OKX API 基础地址，默认 `https://www.okx.com`。 |
+| `BINANCE_BASE_URL` | 自定义 Binance API 基础地址，默认 `https://www.binance.com`。 |
+| `NEWSNOW_CHANNELS` | NewsNow 新闻频道列表，多个频道用逗号分隔。 |
+| `ENABLE_EASTMONEY_PATCH` | 设为 `true` 后启用东方财富限流缓解补丁。 |
+
+示例：
+
+```bash
+export TUSHARE_TOKEN="your-token"
+export ALPHA_VANTAGE_API_KEY="your-api-key"
+```
+
+## 数据源与故障转移
+
+项目内置多个数据源，并根据市场和函数类型自动选择可用来源：
+
+- A 股：Tushare、Efinance、Akshare、Pytdx、Baostock。
+- 港股：Akshare、YFinance。
+- 美股：YFinance、Alpha Vantage、Akshare。
+- 加密货币：OKX、Binance。
+- 新闻：东方财富、新浪、NewsNow。
+
+部分工具会按优先级自动故障转移。例如 A 股日线优先使用高优先级数据源，失败后切换到其他来源；美股基本面优先使用 Alpha Vantage，缺失或未配置时回退到 YFinance。数据源状态可通过 `data_source_status()` 查看。
+
+## 东方财富限流补丁
+
+当东方财富相关接口频繁出现 `RemoteDisconnected`、连接被关闭、请求被重置等问题时，可以开启内置补丁：
 
 ```bash
 export ENABLE_EASTMONEY_PATCH=true
 ```
 
-When enabled, the library will:
+开启后会：
 
-- inject a randomized `User-Agent` for Eastmoney requests
-- fetch and cache an Eastmoney `nid18` token from the anonymous web-report endpoint
-- merge the `nid18` cookie into existing request cookies instead of overwriting them
-- add a small randomized delay before Eastmoney requests to reduce rate-limit pressure
+- 为东方财富请求注入随机 `User-Agent`。
+- 从匿名 web-report 接口获取并缓存 `nid18` token。
+- 将 `nid18` 合并到现有 Cookie。
+- 在请求前加入短随机延迟，降低触发限流的概率。
 
-The patch is applied at the shared `requests.Session.request` layer, so it covers both this project's own `_http_session` requests and Eastmoney requests triggered inside dependencies such as `akshare`.
+补丁作用于共享的 `requests.Session.request` 层，因此同时覆盖项目自身请求和依赖库中触发的东方财富请求。
 
-## Available Tools
+## 可用工具
 
-### A-Stock (价格行情)
-- `index_prices` — A股指数K线数据
-- `stock_prices` — 个股K线数据
-- `stock_realtime` — 个股实时行情
-- `stock_batch_realtime` — 批量实时行情
+### A 股价格行情
 
-### A-Stock (信息查询)
-- `search` — 股票搜索
-- `stock_info` — 个股基本信息
-- `stock_indicators` — 财务指标摘要
-- `get_current_time` — 当前时间与交易日历
+| 工具 | 说明 |
+| --- | --- |
+| `index_prices` | 获取 A 股指数历史价格，例如沪深 300、上证指数。 |
+| `stock_prices` | 获取 A 股、ETF、港股、美股历史价格及技术指标。 |
+| `stock_realtime` | 获取 A 股、港股、ETF 实时行情。 |
+| `stock_batch_realtime` | 批量获取多只 A 股实时行情。 |
 
-### A-Stock (市场资金)
-- `stock_lhb_ggtj_sina` — 龙虎榜
-- `stock_sector_fund_flow_rank` — 板块资金流排名
-- `stock_margin_trading` — 融资融券
-- `stock_zt_pool` — 涨停池
-- `stock_north_flow` — 北向资金
-- `stock_block_trade` — 大宗交易
-- `stock_holder_num` — 股东人数
+### A 股信息查询
 
-### A-Stock (个股分析)
-- `stock_chip` — 筹码分布
-- `stock_fund_flow` — 个股资金流向
-- `stock_sector_spot` — 板块行情
-- `stock_board_cons` — 板块成分股
+| 工具 | 说明 |
+| --- | --- |
+| `search` | 根据名称、公司名或关键词查找股票代码。 |
+| `stock_info` | 获取股票基本信息。 |
+| `stock_indicators` | 获取 A 股、港股、美股财务指标摘要。 |
+| `get_current_time` | 获取当前时间和 A 股交易日信息。 |
 
-### A-Stock (估值财务)
-- `stock_market_pe_percentile` — 市场PE分位
-- `stock_industry_pe` — 行业PE
-- `stock_dividend_history` — 分红历史
-- `stock_institutional_holdings` — 基金持仓
-- `stock_earnings_calendar` — 业绩披露日历
-- `stock_financial_compare` — 财务对比
+### A 股市场资金
 
-### A-Stock (股东)
-- `stock_locked_shares` — 限售解禁
-- `stock_pledge_ratio` — 质押比例
-- `stock_top10_holders` — 十大股东
+| 工具 | 说明 |
+| --- | --- |
+| `stock_zt_pool` | 获取涨停池、强势股池等数据。 |
+| `stock_lhb_ggtj_sina` | 获取龙虎榜个股上榜统计。 |
+| `stock_sector_fund_flow_rank` | 获取行业或概念板块资金流排名。 |
+| `stock_north_flow` | 获取沪深港通北向资金流向。 |
+| `stock_margin_trading` | 获取融资融券数据。 |
+| `stock_block_trade` | 获取大宗交易数据。 |
+| `stock_holder_num` | 获取股东户数变化数据。 |
 
-### A-Stock (量化)
-- `backtest_strategy` — 回测策略
+### A 股个股分析
 
-### US Stock
-- `stock_prices_us` — 美股/港股K线
-- `stock_overview_us` — 美股概览
-- `stock_financials_us` — 美股财报
-- `stock_earnings_us` — 美股业绩
-- `stock_insider_us` — 内部交易
-- `stock_news_us` — 美股新闻
-- `stock_tech_indicators_us` — 美股技术指标
+| 工具 | 说明 |
+| --- | --- |
+| `stock_chip` | 获取筹码分布、获利比例、平均成本和集中度。 |
+| `stock_fund_flow` | 获取个股主力、超大单、大单、中单、小单资金流向。 |
+| `stock_sector_spot` | 获取个股所属行业和概念板块。 |
+| `stock_board_cons` | 获取行业或概念板块成分股。 |
 
-### Crypto
-- `okx_prices` — OKX行情
-- `okx_loan_ratios` — OKX借贷比
-- `okx_taker_volume` — OKX主动买卖量
-- `binance_ai_report` — Binance AI报告
+### A 股估值与财务
 
-### Market & News
-- `stock_news` — 个股新闻
-- `stock_news_global` — 全球财经新闻
-- `data_source_status` — 数据源状态
+| 工具 | 说明 |
+| --- | --- |
+| `stock_market_pe_percentile` | 获取市场整体 PE/PB 历史分位。 |
+| `stock_industry_pe` | 获取行业 PE 对比数据。 |
+| `stock_dividend_history` | 获取个股历史分红送转数据。 |
+| `stock_institutional_holdings` | 获取基金重仓股和机构持仓数据。 |
+| `stock_earnings_calendar` | 获取财报披露日历。 |
+| `stock_financial_compare` | 获取盈利、偿债、运营等多维财务指标。 |
+
+### A 股股东数据
+
+| 工具 | 说明 |
+| --- | --- |
+| `stock_locked_shares` | 获取限售股解禁日历和解禁规模。 |
+| `stock_pledge_ratio` | 获取股权质押统计和质押比例。 |
+| `stock_top10_holders` | 获取十大股东或十大流通股东信息。 |
+
+### A 股量化
+
+| 工具 | 说明 |
+| --- | --- |
+| `backtest_strategy` | 对均线交叉、MACD、KDJ 等简单策略进行回测。 |
+
+### 美股与港股
+
+| 工具 | 说明 |
+| --- | --- |
+| `stock_prices_us` | 获取美股或港股历史价格及技术指标。 |
+| `stock_overview_us` | 获取美股公司概览，包括市值、PE、EPS、股息率、52 周高低点等。 |
+| `stock_financials_us` | 获取美股资产负债表、利润表、现金流量表。 |
+| `stock_news_us` | 获取美股新闻和情绪数据，需要 `ALPHA_VANTAGE_API_KEY`。 |
+| `stock_earnings_us` | 获取美股历史盈利和分析师预期。 |
+| `stock_insider_us` | 获取美股内部人交易记录。 |
+| `stock_tech_indicators_us` | 获取美股 SMA、EMA、RSI、MACD、布林带等技术指标，需要 `ALPHA_VANTAGE_API_KEY`。 |
+
+### 加密货币
+
+| 工具 | 说明 |
+| --- | --- |
+| `okx_prices` | 获取 OKX 加密货币 K 线价格、成交量和技术指标。 |
+| `okx_loan_ratios` | 获取 OKX 杠杆借币多空比。 |
+| `okx_taker_volume` | 获取 OKX 主动买入和主动卖出数据。 |
+| `binance_ai_report` | 获取 Binance 加密货币 AI 分析报告。 |
+
+### 市场新闻与状态
+
+| 工具 | 说明 |
+| --- | --- |
+| `stock_news` | 获取股票或加密货币相关新闻。 |
+| `stock_news_global` | 获取全球财经快讯。 |
+| `data_source_status` | 查看数据源状态和熔断器信息。 |
+
+## 直接导入工具注册表
+
+如果需要批量注册到外部系统，可以使用 `ALL_TOOLS` 或 `TOOL_REGISTRY`：
+
+```python
+from open_stock_data.tools import ALL_TOOLS, TOOL_REGISTRY
+
+print(len(ALL_TOOLS))
+print(TOOL_REGISTRY["stock_prices"][1])
+```
+
+## 许可证
+
+本项目使用 MIT License，详见 [LICENSE](LICENSE)。
