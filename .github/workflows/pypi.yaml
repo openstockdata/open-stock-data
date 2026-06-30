@@ -1,0 +1,89 @@
+name: Publish to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (e.g. 0.1.0). Leave empty to use git tag."
+        required: false
+        type: string
+  release:
+    types: [published]
+
+env:
+  PYPI_PKG_NAME: open-stock-data
+
+jobs:
+  build:
+    name: Build distribution 📦
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+
+    - name: Determine version
+      id: version
+      run: |
+        if [ -n "${{ inputs.version }}" ]; then
+          VERSION="${{ inputs.version }}"
+        elif [ "${{ github.event_name }}" = "release" ]; then
+          VERSION="${GITHUB_REF_NAME#v}"
+        else
+          VERSION=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.0.0")
+        fi
+        echo "value=$VERSION" >> $GITHUB_OUTPUT
+        echo "Building version: $VERSION"
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.x"
+
+    - name: Set version for build
+      run: echo "SETUPTOOLS_SCM_PRETEND_VERSION=${{ steps.version.outputs.value }}" >> $GITHUB_ENV
+
+    - name: Install pypa/build
+      run: python3 -m pip install build --user
+
+    - name: Build a binary wheel and a source tarball
+      run: python3 -m build
+
+    - name: Verify built version
+      run: |
+        ls -la dist/
+        WHEEL=$(ls dist/*.whl)
+        echo "Built wheel: $WHEEL"
+        if [[ "$WHEEL" != *"${{ steps.version.outputs.value }}"* ]]; then
+          echo "ERROR: Built version does not match expected version ${{ steps.version.outputs.value }}"
+          exit 1
+        fi
+
+    - name: Store the distribution packages
+      uses: actions/upload-artifact@v4
+      with:
+        name: python-package-distributions
+        path: dist/
+
+  publish-to-pypi:
+    name: Publish Python 🐍 distribution 📦 to PyPI
+    needs:
+    - build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/${{ env.PYPI_PKG_NAME }}
+    permissions:
+      id-token: write
+    steps:
+    - name: Download all the dists
+      uses: actions/download-artifact@v4
+      with:
+        name: python-package-distributions
+        path: dist/
+
+    - name: Publish distribution 📦 to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        password: ${{ secrets.PYPI_API_TOKEN }}

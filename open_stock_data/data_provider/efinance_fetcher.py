@@ -1,0 +1,394 @@
+"""
+Efinance 数据获取器 (优先级 1)
+使用 efinance 库获取东方财富 A 股数据
+"""
+
+import logging
+from typing import Optional, Dict, List
+
+import pandas as pd
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+from .base import BaseFetcher, DataFetchError, NETWORK_EXCEPTIONS
+from .types import (
+    UnifiedRealtimeQuote,
+    RealtimeSource,
+    safe_float,
+)
+from .stock_code import is_etf_code
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class EfinanceFetcher(BaseFetcher):
+    """Efinance 数据获取器"""
+
+    name = "EfinanceFetcher"
+    priority = 1  # A 股次选
+    backend_group = "eastmoney"
+    _BACKEND_FAILURE_SCOPE_MAP = {
+        "get_realtime_quote": "eastmoney:push2:realtime_quotes",
+        "get_batch_realtime_quotes": "eastmoney:push2:realtime_quotes",
+        "get_a_stock_spot": "eastmoney:push2:realtime_quotes",
+        "get_belong_board": "eastmoney:push2:slist_get",
+        "get_fund_flow": "eastmoney:http:push2his:fund_flow",
+        "get_billboard": "eastmoney:datacenter:daily_billboard",
+    }
+
+    def __init__(self):
+        super().__init__()
+
+        # 延迟导入
+        try:
+            import efinance as ef
+            self._ef = ef
+            self._available = True
+        except ImportError:
+            _LOGGER.warning("efinance 库未安装")
+            self._available = False
+
+    def get_backend_failure_scope(self, method_name: str, *args, **kwargs) -> Optional[str]:
+        scope = self._BACKEND_FAILURE_SCOPE_MAP.get(method_name)
+        if scope:
+            return scope
+        return super().get_backend_failure_scope(method_name, *args, **kwargs)
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=15),
+        retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
+        reraise=True
+    )
+    def _fetch_raw_data(
+        self,
+        stock_code: str,
+        start_date: str,
+        end_date: str
+    ) -> Optional[pd.DataFrame]:
+        """获取原始数据"""
+        if not self._available:
+            return None
+
+        self.random_sleep(0.5, 1.5)
+
+        try:
+            if is_etf_code(stock_code):
+                return self._fetch_etf_data(stock_code, start_date, end_date)
+            else:
+                return self._fetch_stock_data(stock_code, start_date, end_date)
+        except NETWORK_EXCEPTIONS:
+            raise
+        except Exception as e:
+            _LOGGER.warning(f"[{self.name}] 获取 {stock_code} 原始数据失败: {e}")
+            raise DataFetchError(f"获取数据失败: {e}")
+
+    def _fetch_raw_daily_data(
+        self,
+        stock_code: str,
+        start_date: str,
+        end_date: str
+    ) -> Optional[pd.DataFrame]:
+        """获取未复权日线数据。"""
+        try:
+            return self._ef.stock.get_quote_history(
+                stock_codes=stock_code,
+                beg=start_date,
+                end=end_date,
+                klt=101,
+                fqt=0,
+            )
+        except NETWORK_EXCEPTIONS:
+            raise
+        except Exception as e:
+            _LOGGER.warning(f"[{self.name}] 获取 {stock_code} 未复权日线失败: {e}")
+            return None
+
+    def _fetch_stock_data(
+        self,
+        stock_code: str,
+        start_date: str,
+        end_date: str
+    ) -> Optional[pd.DataFrame]:
+        """获取股票数据"""
+        try:
+            # efinance 日期格式: YYYYMMDD
+            df = self._ef.stock.get_quote_history(
+                stock_codes=stock_code,
+                beg=start_date,
+                end=end_date,
+                klt=101,  # 日线
+                fqt=1,    # 前复权
+            )
+            return df
+        except NETWORK_EXCEPTIONS:
+            raise
+        except Exception as e:
+            _LOGGER.warning(f"[{self.name}] 获取股票数据失败: {e}")
+            return None
+
+    def _fetch_etf_data(
+        self,
+        stock_code: str,
+        start_date: str,
+        end_date: str
+    ) -> Optional[pd.DataFrame]:
+        """获取 ETF 数据（使用 stock API，返回 OHLCV K线数据）"""
+        try:
+            df = self._ef.stock.get_quote_history(
+                stock_codes=stock_code,
+                beg=start_date,
+                end=end_date,
+                klt=101,  # 日线
+                fqt=1,    # 前复权
+            )
+            return df
+        except NETWORK_EXCEPTIONS:
+            raise
+        except Exception as e:
+            _LOGGER.warning(f"[{self.name}] 获取 ETF 数据失败: {e}")
+            return None
+
+    def _normalize_data(
+        self,
+        df: pd.DataFrame,
+        stock_code: str
+    ) -> pd.DataFrame:
+        """标准化数据"""
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        # efinance 列名映射（可能有 股票名称/基金名称 前缀）
+        column_mapping = {
+            '日期': 'date',
+            '开盘': 'open',
+            '收盘': 'close',
+            '最高': 'high',
+            '最低': 'low',
+            '成交量': 'volume',
+            '成交额': 'amount',
+            '涨跌幅': 'pct_chg',
+            '换手率': 'turnover_rate',
+        }
+
+        # 处理可能的列名变体
+        for old_col in list(df.columns):
+            for key, new_col in column_mapping.items():
+                if key in old_col:
+                    df = df.rename(columns={old_col: new_col})
+                    break
+
+        # 选择标准列
+        result_cols = ['date', 'open', 'high', 'low', 'close', 'volume', 'amount', 'pct_chg']
+        available_cols = [col for col in result_cols if col in df.columns]
+        df = df[available_cols].copy()
+
+        return df
+
+    def _create_quote_from_row(self, row) -> Optional[UnifiedRealtimeQuote]:
+        """从 DataFrame 行创建 UnifiedRealtimeQuote"""
+        code = str(row.get('股票代码', ''))
+        if not code:
+            return None
+        return UnifiedRealtimeQuote(
+            code=code,
+            name=row.get('股票名称'),
+            source=RealtimeSource.EFINANCE,
+            price=safe_float(row.get('最新价')),
+            change_pct=safe_float(row.get('涨跌幅')),
+            change_amount=safe_float(row.get('涨跌额')),
+            volume=safe_float(row.get('成交量')),
+            amount=safe_float(row.get('成交额')),
+            turnover_rate=safe_float(row.get('换手率')),
+            amplitude=safe_float(row.get('振幅')),
+            open_price=safe_float(row.get('今开')),
+            high=safe_float(row.get('最高')),
+            low=safe_float(row.get('最低')),
+            pre_close=safe_float(row.get('昨收')),
+        )
+
+    def _fetch_all_realtime_quotes(self) -> Dict[str, UnifiedRealtimeQuote]:
+        """获取全市场实时行情"""
+        try:
+            self.random_sleep(0.5, 1.5)
+            df = self._ef.stock.get_realtime_quotes()
+            if df is None or df.empty:
+                return {}
+
+            result: Dict[str, UnifiedRealtimeQuote] = {}
+            for _, row in df.iterrows():
+                quote = self._create_quote_from_row(row)
+                if quote:
+                    result[quote.code] = quote
+
+            return result
+        except NETWORK_EXCEPTIONS:
+            raise
+        except Exception as e:
+            _LOGGER.warning(f"[{self.name}] 获取全市场实时行情失败: {e}")
+            return {}
+
+    def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
+        """获取实时行情（仅支持A股个股，不支持ETF和港股）"""
+        if not self._available:
+            return None
+
+        # ETF 不支持，直接返回 None 让其他数据源处理
+        if is_etf_code(stock_code):
+            _LOGGER.debug(f"[{self.name}] ETF {stock_code} 不支持实时行情，跳过")
+            return None
+
+        quotes = self._fetch_all_realtime_quotes()
+        return quotes.get(stock_code)
+
+    def get_batch_realtime_quotes(
+        self,
+        stock_codes: List[str]
+    ) -> Dict[str, UnifiedRealtimeQuote]:
+        """批量获取实时行情（仅支持A股个股）"""
+        if not self._available:
+            return {}
+
+        # 过滤掉 ETF，只处理 A 股个股
+        a_stock_codes = [code for code in stock_codes if not is_etf_code(code)]
+        if not a_stock_codes:
+            _LOGGER.debug(f"[{self.name}] 批量查询中无A股个股，跳过")
+            return {}
+
+        quotes = self._fetch_all_realtime_quotes()
+        return {code: quotes[code] for code in a_stock_codes if code in quotes}
+
+    def get_base_info(self, stock_code: str) -> Optional[Dict]:
+        """获取股票基本信息"""
+        if not self._available:
+            return None
+
+        try:
+            self.random_sleep(0.5, 1.0)
+            info = self._ef.stock.get_base_info(stock_code)
+            if info is None:
+                return None
+
+            return {
+                'code': stock_code,
+                'pe_ratio': safe_float(info.get('市盈率(动)')),
+                'pb_ratio': safe_float(info.get('市净率')),
+                'industry': info.get('行业'),
+                'total_mv': safe_float(info.get('总市值')),
+                'circ_mv': safe_float(info.get('流通市值')),
+                'roe': safe_float(info.get('ROE')),
+                'net_profit_margin': safe_float(info.get('净利率')),
+            }
+        except NETWORK_EXCEPTIONS:
+            raise
+        except Exception as e:
+            _LOGGER.warning(f"[{self.name}] 获取基本信息失败: {e}")
+            return None
+
+    def get_belong_board(self, stock_code: str) -> Optional[pd.DataFrame]:
+        """获取所属板块"""
+        if not self._available:
+            return None
+
+        try:
+            self.random_sleep(0.5, 1.0)
+            df = self._ef.stock.get_belong_board(stock_code)
+            return df
+        except NETWORK_EXCEPTIONS:
+            raise
+        except Exception as e:
+            _LOGGER.warning(f"[{self.name}] 获取所属板块失败: {e}")
+            return None
+
+    def get_fund_flow(self, stock_code: str) -> Optional[pd.DataFrame]:
+        """获取资金流向"""
+        if not self._available:
+            return None
+
+        try:
+            self.random_sleep(0.5, 1.5)
+            df = self._ef.stock.get_history_bill(stock_code)
+            return df
+        except NETWORK_EXCEPTIONS:
+            raise
+        except Exception as e:
+            _LOGGER.warning(f"[{self.name}] 获取资金流向失败: {e}")
+            return None
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=2, max=30),
+        retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
+        reraise=True
+    )
+    def get_billboard(self, days: str = "5") -> Optional[pd.DataFrame]:
+        """获取龙虎榜统计（当日龙虎榜，带重试机制）"""
+        if not self._available:
+            return None
+
+        try:
+            self.random_sleep(0.5, 1.5)
+            df = self._ef.stock.get_daily_billboard()
+            return df
+        except NETWORK_EXCEPTIONS:
+            raise
+        except Exception as e:
+            _LOGGER.warning(f"[{self.name}] 获取龙虎榜失败: {e}")
+            return None
+
+    def get_a_stock_spot(self) -> Optional[pd.DataFrame]:
+        """获取全市场A股行情快照"""
+        if not self._available:
+            _LOGGER.debug(f"[{self.name}] 数据源不可用，跳过全市场A股行情")
+            return None
+
+        _LOGGER.debug(
+            "[%s] 开始获取全市场A股行情: api=ef.stock.get_realtime_quotes, backend_group=%s",
+            self.name,
+            self.backend_group or "-",
+        )
+
+        try:
+            self.random_sleep(0.5, 1.5)
+            df = self._ef.stock.get_realtime_quotes()
+            if df is None:
+                _LOGGER.debug(f"[{self.name}] ef.stock.get_realtime_quotes 返回 None")
+                return None
+            if df.empty:
+                _LOGGER.debug(f"[{self.name}] ef.stock.get_realtime_quotes 返回空 DataFrame")
+                return None
+
+            # 列名映射，对齐 akshare stock_zh_a_spot_em 的列名
+            col_map = {
+                "股票代码": "代码",
+                "股票名称": "名称",
+                "最新价": "最新价",
+                "涨跌幅": "涨跌幅",
+                "换手率": "换手率",
+                "量比": "量比",
+                "动态市盈率": "市盈率-动态",
+                "总市值": "总市值",
+                "流通市值": "流通市值",
+                "成交量": "成交量",
+                "成交额": "成交额",
+                "最高": "最高",
+                "最低": "最低",
+                "今开": "今开",
+                "昨日收盘": "昨收",
+            }
+            df = df.rename(columns=col_map)
+            _LOGGER.debug(
+                "[%s] 获取全市场A股行情成功: rows=%s, cols=%s",
+                self.name,
+                len(df),
+                list(df.columns[:8]),
+            )
+            df.attrs["spot_complete"] = True
+            return df
+        except NETWORK_EXCEPTIONS as e:
+            _LOGGER.debug(
+                f"[{self.name}] 全市场A股行情网络异常: {type(e).__name__}: {e}"
+            )
+            raise
+        except Exception as e:
+            _LOGGER.warning(f"[{self.name}] 获取全市场行情失败: {type(e).__name__}: {e}")
+            return None
