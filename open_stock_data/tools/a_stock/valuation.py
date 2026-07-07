@@ -203,9 +203,11 @@ def stock_institutional_holdings(
     limit: int = Field(30, description="返回数量限制"),
 ):
     try:
+        date = resolve_field(date, "")
+        limit = resolve_field(limit, 30)
+
         manager = get_data_manager()
-        date_str = date if isinstance(date, str) else ""
-        df = manager.get_fund_holder("", date=date_str)
+        df = manager.get_fund_holder("", date=date)
 
         if df is None or df.empty:
             return "未获取到基金持仓数据"

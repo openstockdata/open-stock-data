@@ -94,11 +94,9 @@ class TestInstitutionalHoldings:
         """测试最新季度基金持仓（返回重仓股榜单）"""
         result = t.stock_institutional_holdings()
         preview(result, "institutional_holdings")
-        # 这个函数有已知bug，暂时允许失败
-        if result and "失败" not in result:
-            assert_has_data(result)
-            # 验证包含基金持仓信息
-            assert "基金" in result or "持仓" in result or "股票" in result
+        assert_has_data(result)
+        # 验证包含基金持仓信息
+        assert "基金" in result or "持仓" in result or "股票" in result
 
     def test_institutional_holdings_with_date(self, t):
         """测试指定季度基金持仓"""
