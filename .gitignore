@@ -12,6 +12,10 @@ wheels/
 # Lock file (library, not application)
 uv.lock
 
+# Environment variables (contains secrets)
+.env
+**/.env
+
 # Local / AI tools
 .claude/
 CLAUDE.md
