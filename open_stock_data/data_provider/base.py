@@ -44,6 +44,7 @@ from ..exceptions import (
 )
 
 if TYPE_CHECKING:
+    from .tickflow_fetcher import TickflowFetcher
     from .efinance_fetcher import EfinanceFetcher
     from .akshare_fetcher import AkshareFetcher
     from .tushare_fetcher import TushareFetcher
@@ -52,6 +53,11 @@ if TYPE_CHECKING:
     from .yfinance_fetcher import YfinanceFetcher
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _priority_order(*fetcher_names: str) -> Dict[str, int]:
+    """按声明顺序生成函数级数据源优先级。"""
+    return {name: priority for priority, name in enumerate(fetcher_names)}
 
 
 def _is_network_error(e: Exception) -> bool:
@@ -341,106 +347,67 @@ class DataFetcherManager:
     # 未配置的函数使用全局 self._fetchers 顺序
     _function_priorities: Dict[str, Dict[str, int]] = {
         # ---- 日线数据 ----
-        # A股批量取数时优先使用 Eastmoney，避免 Tushare 分钟配额被大量消耗。
-        "get_daily_data": {
-            "EfinanceFetcher": 0,
-            "AkshareFetcher": 1,
-            "TushareFetcher": 2,
-            "PytdxFetcher": 3,
-            "BaostockFetcher": 4,
-        },
-        "get_raw_daily_data": {
-            "EfinanceFetcher": 0,
-            "AkshareFetcher": 1,
-        },
+        # TickFlow 优先于 Tushare；未配置 API Key 时仍可使用官方免费日线服务。
+        "get_daily_data": _priority_order(
+            "TickflowFetcher",
+            "EfinanceFetcher",
+            "AkshareFetcher",
+            "TushareFetcher",
+            "PytdxFetcher",
+            "BaostockFetcher",
+        ),
+        "get_raw_daily_data": _priority_order(
+            "TickflowFetcher",
+            "EfinanceFetcher",
+            "AkshareFetcher",
+        ),
         # ---- 实时行情 ----
-        # A股：Efinance 批量全市场缓存最快
-        "get_realtime_quote": {
-            "EfinanceFetcher": 0,
-            "TushareFetcher": 1,
-            "AkshareFetcher": 2,
-        },
-        "get_bid_ask": {
-            "AkshareFetcher": 0,
-        },
+        # TickFlow 有 API Key 时优先提供实时行情；未配置时自动跳过。
+        "get_realtime_quote": _priority_order(
+            "TickflowFetcher",
+            "EfinanceFetcher",
+            "TushareFetcher",
+            "AkshareFetcher",
+        ),
+        "get_bid_ask": _priority_order("AkshareFetcher"),
         # 全市场A股快照：Akshare 优先，失败回退 Efinance（不同 HTTP 客户端，互为备份）
-        "get_a_stock_spot": {
-            "AkshareFetcher": 0,
-            "EfinanceFetcher": 1,
-        },
+        "get_a_stock_spot": _priority_order("AkshareFetcher", "EfinanceFetcher"),
         # 港股：Akshare 数据全
-        "get_realtime_quote:hk": {
-            "AkshareFetcher": 0,
-            "YfinanceFetcher": 1,
-        },
+        "get_realtime_quote:hk": _priority_order(
+            "TickflowFetcher",
+            "AkshareFetcher",
+            "YfinanceFetcher",
+        ),
         # ETF：Akshare 支持 fund_etf_spot_em
-        "get_realtime_quote:etf": {
-            "AkshareFetcher": 0,
-            "YfinanceFetcher": 1,
-        },
+        "get_realtime_quote:etf": _priority_order(
+            "TickflowFetcher",
+            "AkshareFetcher",
+            "YfinanceFetcher",
+        ),
         # 美股：YFinance 免费实时报价
-        "get_realtime_quote:us": {
-            "YfinanceFetcher": 0,
-            "AlphaVantage": 1,
-        },
+        "get_realtime_quote:us": _priority_order(
+            "TickflowFetcher",
+            "YfinanceFetcher",
+            "AlphaVantage",
+        ),
         # ---- 资金流向/所属板块/龙虎榜 ----
         # Efinance 响应快且支持批量，Tushare 有配额限制放后面
-        "get_fund_flow": {
-            "EfinanceFetcher": 0,
-            "TushareFetcher": 1,
-            "AkshareFetcher": 2,
-        },
-        "get_belong_board": {
-            "EfinanceFetcher": 0,
-            "TushareFetcher": 1,
-            "AkshareFetcher": 2,
-        },
-        "get_board_cons": {
-            "AkshareFetcher": 0,
-            "TushareFetcher": 1,
-        },
-        "get_billboard": {
-            "EfinanceFetcher": 0,
-            "AkshareFetcher": 1,
-            "TushareFetcher": 2,
-        },
+        "get_fund_flow": _priority_order("EfinanceFetcher", "TushareFetcher", "AkshareFetcher"),
+        "get_belong_board": _priority_order("EfinanceFetcher", "TushareFetcher", "AkshareFetcher"),
+        "get_board_cons": _priority_order("AkshareFetcher", "TushareFetcher"),
+        "get_billboard": _priority_order("EfinanceFetcher", "AkshareFetcher", "TushareFetcher"),
         # ---- Akshare 财务扩展 ----
-        "get_chip_distribution": {
-            "AkshareFetcher": 0,
-        },
-        "get_margin_detail": {
-            "AkshareFetcher": 0,
-        },
-        "get_dividend_history": {
-            "TushareFetcher": 0,
-            "AkshareFetcher": 1,
-        },
-        "get_fund_holder": {
-            "TushareFetcher": 0,
-            "AkshareFetcher": 1,
-        },
-        "get_top10_holders": {
-            "TushareFetcher": 0,
-            "AkshareFetcher": 1,
-        },
-        "get_industry_pe": {
-            "AkshareFetcher": 0,
-        },
-        "get_earnings_forecast": {
-            "AkshareFetcher": 0,
-        },
-        "get_earnings_report": {
-            "AkshareFetcher": 0,
-        },
-        "get_earnings_express": {
-            "AkshareFetcher": 0,
-        },
-        "get_dividend_plan": {
-            "AkshareFetcher": 0,
-        },
-        "get_dividend_cninfo": {
-            "AkshareFetcher": 0,
-        },
+        "get_chip_distribution": _priority_order("AkshareFetcher"),
+        "get_margin_detail": _priority_order("AkshareFetcher"),
+        "get_dividend_history": _priority_order("TushareFetcher", "AkshareFetcher"),
+        "get_fund_holder": _priority_order("TushareFetcher", "AkshareFetcher"),
+        "get_top10_holders": _priority_order("TushareFetcher", "AkshareFetcher"),
+        "get_industry_pe": _priority_order("AkshareFetcher"),
+        "get_earnings_forecast": _priority_order("AkshareFetcher"),
+        "get_earnings_report": _priority_order("AkshareFetcher"),
+        "get_earnings_express": _priority_order("AkshareFetcher"),
+        "get_dividend_plan": _priority_order("AkshareFetcher"),
+        "get_dividend_cninfo": _priority_order("AkshareFetcher"),
     }
 
     def __init__(self, auto_init: bool = True):
@@ -530,6 +497,14 @@ class DataFetcherManager:
 
     def _init_default_fetchers(self):
         """初始化默认数据源"""
+        try:
+            from .tickflow_fetcher import TickflowFetcher
+            fetcher = TickflowFetcher()
+            if fetcher.is_available:
+                self.add_fetcher(fetcher)
+        except Exception as e:
+            _LOGGER.warning(f"TickflowFetcher 初始化失败: {e}")
+
         try:
             from .efinance_fetcher import EfinanceFetcher
             self.add_fetcher(EfinanceFetcher())
@@ -795,44 +770,20 @@ class DataFetcherManager:
             _LOGGER.debug("[cache] realtime hit: %s", stock_code)
             return cached
 
-        circuit_breaker = get_circuit_breaker("realtime")
-        failed_backend_scopes: set = set()
+        # 使用泛型故障转移方法
+        quote = self._get_with_failover(
+            "get_realtime_quote",
+            get_circuit_breaker("realtime"),
+            f"{stock_code} 实时行情",
+            stock_code,
+            fetchers=self._get_fetchers_for("get_realtime_quote", stock_type),
+            accept_result=lambda q: q is not None and q.has_basic_data(),
+        )
 
-        for fetcher in self._get_fetchers_for("get_realtime_quote", stock_type):
-            source_name = fetcher.name
+        if quote is not None:
+            self._set_dynamic_cached(cache_key, quote)
 
-            if not circuit_breaker.is_available(source_name):
-                continue
-
-            should_skip, backend_scope = self._is_backend_scope_failed(
-                failed_backend_scopes,
-                fetcher,
-                "get_realtime_quote",
-                stock_code,
-            )
-            if should_skip:
-                _LOGGER.debug(f"[{source_name}] 后端作用域 {backend_scope} 已故障，跳过实时行情")
-                continue
-
-            try:
-                quote = fetcher.get_realtime_quote(stock_code)
-                if quote is not None and quote.has_basic_data():
-                    circuit_breaker.record_success(source_name)
-                    self._set_dynamic_cached(cache_key, quote)
-                    return quote
-            except Exception as e:
-                circuit_breaker.record_failure(source_name, str(e))
-                if _is_network_error(e):
-                    self._mark_backend_scope_failed(
-                        failed_backend_scopes,
-                        fetcher,
-                        "get_realtime_quote",
-                        stock_code,
-                    )
-                _LOGGER.warning(f"[{source_name}] 获取 {stock_code} 实时行情失败: {e}")
-                continue
-
-        return None
+        return quote
 
     def get_chip_distribution(self, stock_code: str) -> Optional[ChipDistribution]:
         """
@@ -844,43 +795,12 @@ class DataFetcherManager:
         Returns:
             ChipDistribution 或 None
         """
-        circuit_breaker = get_circuit_breaker("chip")
-        failed_backend_scopes: set = set()
-
-        for fetcher in self._fetchers:
-            source_name = fetcher.name
-
-            if not circuit_breaker.is_available(source_name):
-                continue
-
-            should_skip, backend_scope = self._is_backend_scope_failed(
-                failed_backend_scopes,
-                fetcher,
-                "get_chip_distribution",
-                stock_code,
-            )
-            if should_skip:
-                _LOGGER.debug(f"[{source_name}] 后端作用域 {backend_scope} 已故障，跳过筹码分布")
-                continue
-
-            try:
-                chip = fetcher.get_chip_distribution(stock_code)
-                if chip is not None:
-                    circuit_breaker.record_success(source_name)
-                    return chip
-            except Exception as e:
-                circuit_breaker.record_failure(source_name, str(e))
-                if _is_network_error(e):
-                    self._mark_backend_scope_failed(
-                        failed_backend_scopes,
-                        fetcher,
-                        "get_chip_distribution",
-                        stock_code,
-                    )
-                _LOGGER.warning(f"[{source_name}] 获取 {stock_code} 筹码分布失败: {e}")
-                continue
-
-        return None
+        return self._get_with_failover(
+            "get_chip_distribution",
+            get_circuit_breaker("chip"),
+            f"{stock_code} 筹码分布",
+            stock_code,
+        )
 
     def prefetch_realtime_quotes(
         self,
@@ -1005,20 +925,20 @@ class DataFetcherManager:
     # 但实际走不同 HTTP 端点，一个失败不代表另一个也不可用）
     _skip_backend_group_methods: set = {"get_a_stock_spot"}
 
-    def _get_data_with_failover(
+    def _get_with_failover(
         self,
         method_name: str,
         circuit_breaker,
         label: str,
         *args,
         fetchers: Optional[List[BaseFetcher]] = None,
-        accept_result: Optional[Callable[[pd.DataFrame], bool]] = None,
+        accept_result: Optional[Callable[[Any], bool]] = None,
         return_unaccepted_fallback: bool = False,
         unaccepted_reason: str = "unaccepted",
         **kwargs,
-    ) -> Optional[pd.DataFrame]:
+    ) -> Optional[Any]:
         """
-        通用多数据源故障转移
+        通用多数据源故障转移（泛型版本，支持任意返回类型）
 
         Args:
             method_name: BaseFetcher 上的方法名
@@ -1034,8 +954,7 @@ class DataFetcherManager:
         check_backend = method_name not in self._skip_backend_group_methods
         ordered_fetchers = fetchers or self._get_fetchers_for(method_name)
         attempt_summaries: List[str] = []
-        unaccepted_fallback: Optional[pd.DataFrame] = None
-        base_method = getattr(BaseFetcher, method_name, None)
+        unaccepted_fallback: Optional[Any] = None
 
         _LOGGER.debug(
             "[failover] 开始获取%s: method=%s, fetchers=%s, check_backend=%s",
@@ -1085,46 +1004,61 @@ class DataFetcherManager:
                     method_name,
                     fetcher.backend_group or "-",
                 )
-                df = fn(*args, **kwargs)
+                result = fn(*args, **kwargs)
                 elapsed = time.monotonic() - started_at
-                if df is None:
+
+                if result is None:
                     _LOGGER.debug(f"[{source_name}] 获取{label}返回 None，耗时 {elapsed:.2f}s")
                     attempt_summaries.append(f"{source_name}:none:{elapsed:.2f}s")
                     continue
-                if df.empty:
+
+                # 检查是否为空数据（DataFrame/list/dict等）
+                is_empty = False
+                if hasattr(result, 'empty'):
+                    is_empty = result.empty
+                elif hasattr(result, '__len__'):
+                    is_empty = len(result) == 0
+
+                if is_empty:
                     _LOGGER.debug(f"[{source_name}] 获取{label}返回空数据，耗时 {elapsed:.2f}s")
                     attempt_summaries.append(f"{source_name}:empty:{elapsed:.2f}s")
                     continue
-                df.attrs['source'] = source_name
-                if accept_result is not None and not accept_result(df):
+
+                # 设置source属性（如果支持）
+                if hasattr(result, 'attrs'):
+                    result.attrs['source'] = source_name
+                elif isinstance(result, dict) and '_source' not in result:
+                    result['_source'] = source_name
+
+                # 自定义结果校验
+                if accept_result is not None and not accept_result(result):
                     if return_unaccepted_fallback and unaccepted_fallback is None:
-                        unaccepted_fallback = df
+                        unaccepted_fallback = result
                     circuit_breaker.record_failure(
                         source_name,
-                        f"{unaccepted_reason}: rows={len(df)}",
+                        f"{unaccepted_reason}",
                     )
                     _LOGGER.info(
-                        "[%s] 获取%s结果未通过校验，继续回退: reason=%s, rows=%s, 耗时 %.2fs",
+                        "[%s] 获取%s结果未通过校验，继续回退: reason=%s, 耗时 %.2fs",
                         source_name,
                         label,
                         unaccepted_reason,
-                        len(df),
                         elapsed,
                     )
                     attempt_summaries.append(
                         f"{source_name}:{unaccepted_reason}:{elapsed:.2f}s"
                     )
                     continue
+
                 circuit_breaker.record_success(source_name)
                 _LOGGER.debug(
-                    "[%s] 成功获取%s: rows=%s, cols=%s, 耗时 %.2fs",
+                    "[%s] 成功获取%s, 耗时 %.2fs",
                     source_name,
                     label,
-                    len(df),
-                    list(df.columns[:8]),
                     elapsed,
                 )
-                return df
+                return result
+
             except RateLimitError as e:
                 # 配额超限：立即熔断，使用动态冷却时间
                 cooldown = e.retry_after or 300
@@ -1191,6 +1125,33 @@ class DataFetcherManager:
         else:
             _LOGGER.error(f"所有数据源均无法获取{label}")
         return None
+
+    def _get_data_with_failover(
+        self,
+        method_name: str,
+        circuit_breaker,
+        label: str,
+        *args,
+        fetchers: Optional[List[BaseFetcher]] = None,
+        accept_result: Optional[Callable[[pd.DataFrame], bool]] = None,
+        return_unaccepted_fallback: bool = False,
+        unaccepted_reason: str = "unaccepted",
+        **kwargs,
+    ) -> Optional[pd.DataFrame]:
+        """
+        DataFrame 专用的故障转移方法（向后兼容，内部调用泛型版本）
+        """
+        return self._get_with_failover(
+            method_name,
+            circuit_breaker,
+            label,
+            *args,
+            fetchers=fetchers,
+            accept_result=accept_result,
+            return_unaccepted_fallback=return_unaccepted_fallback,
+            unaccepted_reason=unaccepted_reason,
+            **kwargs,
+        )
 
     def get_bid_ask(self, stock_code: str) -> Optional[pd.DataFrame]:
         """获取五档盘口，自动故障转移"""

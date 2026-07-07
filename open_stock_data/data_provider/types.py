@@ -47,6 +47,7 @@ def safe_int(val, default: Optional[int] = None) -> Optional[int]:
 
 class RealtimeSource(Enum):
     """实时行情数据源"""
+    TICKFLOW = "tickflow"
     TUSHARE = "tushare"
     EFINANCE = "efinance"
     AKSHARE_EM = "akshare_em"

@@ -23,6 +23,7 @@ from .types import (
     safe_int,
 )
 from .stock_code import is_etf_code, is_hk_code, normalize_hk_code
+from .capability_definitions import create_akshare_capability
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -81,6 +82,7 @@ class AkshareFetcher(BaseFetcher):
 
     def __init__(self):
         super().__init__()
+        self.capability = create_akshare_capability()
 
     def get_backend_failure_scope(self, method_name: str, *args, **kwargs) -> Optional[str]:
         if method_name == "get_board_cons":

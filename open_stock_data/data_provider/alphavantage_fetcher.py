@@ -19,6 +19,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 from .base import BaseFetcher, DataFetchError, RateLimitError, NETWORK_EXCEPTIONS
 from ..logging_safety import sanitize_for_logging
+from .capability_definitions import create_alphavantage_capability
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ class AlphaVantageFetcher(BaseFetcher):
         self._last_request_time = 0
         self._min_request_interval = 12.5  # 免费版每分钟 5 次请求限制
         self._session = requests.Session()
+        self.capability = create_alphavantage_capability()
         atexit.register(self._session.close)
 
         if not self._available:

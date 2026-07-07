@@ -17,6 +17,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from .base import BaseFetcher, DataFetchError, RateLimitError, NETWORK_EXCEPTIONS
 from .types import UnifiedRealtimeQuote, RealtimeSource, safe_float
 from ..cache import CACHE_TTLS, CacheStore
+from .capability_definitions import create_tushare_capability
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class TushareFetcher(BaseFetcher):
     def __init__(self):
         super().__init__()
         self._api = None
+        self.capability = create_tushare_capability()
 
         # 从环境变量获取 token
         token = os.getenv("TUSHARE_TOKEN")

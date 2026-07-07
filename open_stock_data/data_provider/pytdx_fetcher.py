@@ -22,6 +22,7 @@ from .types import (
 )
 from .columns import STANDARD_COLUMNS
 from .stock_code import is_hk_code, is_us_code, is_etf_code, is_a_stock_code
+from .capability_definitions import create_pytdx_capability
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -85,6 +86,7 @@ class PytdxFetcher(BaseFetcher):
 
     def __init__(self, hosts: Optional[List[Tuple[str, int]]] = None):
         super().__init__()
+        self.capability = create_pytdx_capability()
         env_hosts = _parse_hosts_from_env()
         self._hosts = hosts or env_hosts or DEFAULT_HOSTS
         self._current_host_idx = 0

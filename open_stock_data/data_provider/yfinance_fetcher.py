@@ -13,6 +13,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from .base import BaseFetcher, DataFetchError, NETWORK_EXCEPTIONS
 from .types import UnifiedRealtimeQuote, RealtimeSource, safe_float
 from .stock_code import is_hk_code, is_us_code, is_etf_code
+from .capability_definitions import create_yfinance_capability
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ class YfinanceFetcher(BaseFetcher):
     def __init__(self):
         super().__init__()
         self._yf = None
+        self.capability = create_yfinance_capability()
 
         # 延迟导入
         try:

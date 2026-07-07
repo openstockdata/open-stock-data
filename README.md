@@ -45,6 +45,8 @@ print(stock_realtime(symbol="01810.HK", market="hk"))
 
 | 变量 | 说明 |
 | --- | --- |
+| `TICKFLOW_API_KEY` | TickFlow API key。配置后启用 TickFlow 实时行情；未配置时仍使用官方免费服务获取历史日 K。 |
+| `TICKFLOW_API_URL` | 自定义 TickFlow API 基础地址；有 key 默认 `https://api.tickflow.org`，无 key 默认 `https://free-api.tickflow.org`。 |
 | `TUSHARE_TOKEN` | Tushare Pro token。配置后启用 Tushare A 股数据源。 |
 | `ALPHA_VANTAGE_API_KEY` | Alpha Vantage API key。配置后启用部分美股新闻、技术指标和财务数据增强能力。 |
 | `OKX_BASE_URL` | 自定义 OKX API 基础地址，默认 `https://www.okx.com`。 |
@@ -55,21 +57,39 @@ print(stock_realtime(symbol="01810.HK", market="hk"))
 示例：
 
 ```bash
+export TICKFLOW_API_KEY="your-api-key"
 export TUSHARE_TOKEN="your-token"
 export ALPHA_VANTAGE_API_KEY="your-api-key"
 ```
 
 ## 数据源与故障转移
 
-项目内置多个数据源，并根据市场和函数类型自动选择可用来源：
+项目内置 8 个数据源，并根据市场和函数类型自动选择可用来源：
 
-- A 股：Tushare、Efinance、Akshare、Pytdx、Baostock。
-- 港股：Akshare、YFinance。
-- 美股：YFinance、Alpha Vantage、Akshare。
-- 加密货币：OKX、Binance。
-- 新闻：东方财富、新浪、NewsNow。
+- **TickFlow**: 全球市场，免费日线K线，配置 API key 后支持实时行情
+- **A 股**: Efinance、Akshare、Tushare、Pytdx、Baostock
+- **港股**: TickFlow、Akshare、YFinance
+- **美股**: TickFlow、YFinance、Alpha Vantage
+- **加密货币**: OKX、Binance
+- **新闻**: 东方财富、新浪、NewsNow
 
-部分工具会按优先级自动故障转移。例如 A 股日线优先使用高优先级数据源，失败后切换到其他来源；美股基本面优先使用 Alpha Vantage，缺失或未配置时回退到 YFinance。数据源状态可通过 `data_source_status()` 查看。
+### 故障转移优先级
+
+部分工具会按优先级自动故障转移：
+
+- **K线数据**: `TickFlow → Efinance → Akshare → Tushare → Pytdx → Baostock`
+- **A股实时**: `TickFlow → Efinance → Tushare → Akshare`
+- **港股实时**: `TickFlow → Akshare → YFinance`
+- **美股实时**: `TickFlow → YFinance → AlphaVantage`
+
+**注意**:
+- TickFlow 未配置 API key 时仅用于免费日线，实时行情自动回退到其他源
+- Tushare 需配置 token，配额限制 50次/分钟
+- AlphaVantage 需配置 API key，配额限制 5次/分钟、500次/天
+
+完整的数据源能力对照和故障转移配置详见 [docs/FETCHER_CAPABILITIES.md](docs/FETCHER_CAPABILITIES.md)。
+
+数据源状态可通过 `data_source_status()` 查看。
 
 ## 东方财富限流补丁
 

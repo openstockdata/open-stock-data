@@ -53,6 +53,7 @@ def get_data_manager() -> DataFetcherManager:
 # 数据源名称映射：将 Fetcher 类名转换为友好显示名称
 _SOURCE_NAME_MAP = {
     # Fetcher 类名映射
+    "TickflowFetcher": "tickflow",
     "EfinanceFetcher": "efinance",
     "AkshareFetcher": "akshare",
     "TushareFetcher": "tushare",

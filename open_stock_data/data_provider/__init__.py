@@ -2,6 +2,7 @@
 多数据源数据提供层
 
 支持自动故障转移的多数据源股票数据获取：
+- TickflowFetcher (优先级 0): TickFlow 行情数据（日线支持免费服务，实时行情需要 API key）
 - TushareFetcher (优先级 0): Tushare Pro A 股数据（需要 token）
 - EfinanceFetcher (优先级 1): 东方财富 A 股数据
 - AkshareFetcher (优先级 2): Akshare 多市场数据
@@ -71,12 +72,14 @@ from .baostock_fetcher import BaostockFetcher
 from .yfinance_fetcher import YfinanceFetcher
 from .alphavantage_fetcher import AlphaVantageFetcher, AlphaVantageRateLimitError
 from .pytdx_fetcher import PytdxFetcher
+from .tickflow_fetcher import TickflowFetcher
 
 __all__ = [
     # 管理器
     "DataFetcherManager",
     # 数据获取器
     "BaseFetcher",
+    "TickflowFetcher",
     "EfinanceFetcher",
     "AkshareFetcher",
     "TushareFetcher",

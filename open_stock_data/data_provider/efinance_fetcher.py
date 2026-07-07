@@ -16,6 +16,7 @@ from .types import (
     safe_float,
 )
 from .stock_code import is_etf_code
+from .capability_definitions import create_efinance_capability
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class EfinanceFetcher(BaseFetcher):
 
     def __init__(self):
         super().__init__()
+        self.capability = create_efinance_capability()
 
         # 延迟导入
         try:
