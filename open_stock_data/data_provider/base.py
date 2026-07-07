@@ -347,19 +347,21 @@ class DataFetcherManager:
     # 未配置的函数使用全局 self._fetchers 顺序
     _function_priorities: Dict[str, Dict[str, int]] = {
         # ---- 日线数据 ----
-        # TickFlow 优先于 Tushare；未配置 API Key 时仍可使用官方免费日线服务。
+        # TickFlow 10次/分钟限流，Tushare 50次/分钟
+        # 单只股票查询时：Efinance/Akshare 稳定性好，TickFlow 和 Tushare 适合少量查询
         "get_daily_data": _priority_order(
-            "TickflowFetcher",
             "EfinanceFetcher",
             "AkshareFetcher",
             "TushareFetcher",
+            "TickflowFetcher",  # 在 Tushare 后，避免过快触发限流
             "PytdxFetcher",
             "BaostockFetcher",
         ),
         "get_raw_daily_data": _priority_order(
-            "TickflowFetcher",
             "EfinanceFetcher",
             "AkshareFetcher",
+            "TushareFetcher",
+            "TickflowFetcher",  # 在 Tushare 后
         ),
         # ---- 实时行情 ----
         # TickFlow 有 API Key 时优先提供实时行情；未配置时自动跳过。
@@ -370,8 +372,8 @@ class DataFetcherManager:
             "AkshareFetcher",
         ),
         "get_bid_ask": _priority_order("AkshareFetcher"),
-        # 全市场A股快照：Akshare 优先，失败回退 Efinance（不同 HTTP 客户端，互为备份）
-        "get_a_stock_spot": _priority_order("AkshareFetcher", "EfinanceFetcher"),
+        # 全市场A股快照：Efinance 更稳定，优先使用；Akshare 作为备份
+        "get_a_stock_spot": _priority_order("EfinanceFetcher", "AkshareFetcher"),
         # 港股：Akshare 数据全
         "get_realtime_quote:hk": _priority_order(
             "TickflowFetcher",
