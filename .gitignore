@@ -12,14 +12,6 @@ wheels/
 # Lock file (library, not application)
 uv.lock
 
-# Local tests (not for upload)
-tests/
-pytest.ini
-.pytest_cache/
-
-# Environment variables (contains secrets)
-.env
-
 # Local / AI tools
 .claude/
 CLAUDE.md
