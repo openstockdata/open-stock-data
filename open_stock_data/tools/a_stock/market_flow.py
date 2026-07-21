@@ -19,6 +19,8 @@ from ...utils import (
     _detect_stock_market,
     resolve_field,
 )
+from ...client import get_default_client
+from ...exceptions import AllSourcesFailed
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -110,22 +112,17 @@ def stock_lhb_ggtj_sina(
     days: str = Field("5", description="统计最近天数，仅支持: [5/10/30/60]"),
     limit: int = Field(50, description="返回数量(int,30-100)", strict=False),
 ):
-    try:
-        days = resolve_field(days, "5")
-        limit = resolve_field(limit, 50)
-        manager = get_data_manager()
-        dfs = manager.get_billboard(days)
+    days = resolve_field(days, "5")
+    limit = resolve_field(limit, 50)
+    result = get_default_client().billboard(days)
 
-        if dfs is None or dfs.empty:
-            return "获取龙虎榜数据失败"
-
-        source = format_source_name(dfs.attrs.get('source', ''))
-        dfs = dfs.head(int(limit))
-        lines = [f"# 龙虎榜统计", f"# 数据来源: {source}"]
-        lines.append(dfs.to_csv(index=False, float_format="%.2f").strip())
-        return "\n".join(lines)
-    except Exception as e:
-        return f"获取龙虎榜数据失败: {e}"
+    dfs = result.data.head(int(limit))
+    lines = [
+        "# 龙虎榜统计",
+        f"# 数据来源: {format_source_name(result.source)}",
+        dfs.to_csv(index=False, float_format="%.2f").strip(),
+    ]
+    return "\n".join(lines)
 
 
 # ==================== 板块资金流 ====================
@@ -256,33 +253,23 @@ def stock_margin_trading(
         limit = resolve_field(limit, 30)
         if isinstance(symbol, str) and symbol:
             stock_market = _detect_stock_market(symbol)
-            manager = get_data_manager()
-            df = manager.get_margin_detail(symbol, stock_market)
+            result = get_default_client().margin_detail(symbol, stock_market)
+            df = result.data
+            source = format_source_name(result.source)
+            is_ratio = df.attrs.get('is_ratio_data', False)
 
-            if df is not None and not df.empty:
-                source = format_source_name(df.attrs.get('source', ''))
-                is_ratio = df.attrs.get('is_ratio_data', False)
-
-                if is_ratio:
-                    lines = [
-                        f"# {symbol} 融资融券比例",
-                        f"# 数据来源: {source}",
-                        f"# 注: 交易所明细接口暂不可用，以下为融资融券比例数据",
-                    ]
-                    lines.append(df.head(limit).to_csv(index=False, float_format="%.2f").strip())
-                    return "\n".join(lines)
-                else:
-                    lines = [f"# {symbol} 融资融券", f"# 数据来源: {source}"]
-                    lines.append(df.head(limit).to_csv(index=False, float_format="%.2f").strip())
-                    return "\n".join(lines)
-
-            return (
-                f"获取个股 {symbol} 融资融券数据失败\n\n"
-                f"可能原因:\n"
-                f"1. 该股票不在融资融券标的范围内\n"
-                f"2. akshare深交所接口存在兼容性问题（建议升级akshare）\n"
-                f"3. 网络连接问题"
-            )
+            if is_ratio:
+                lines = [
+                    f"# {symbol} 融资融券比例",
+                    f"# 数据来源: {source}",
+                    "# 注: 交易所明细接口暂不可用，以下为融资融券比例数据",
+                ]
+                lines.append(df.head(limit).to_csv(index=False, float_format="%.2f").strip())
+                return "\n".join(lines)
+            else:
+                lines = [f"# {symbol} 融资融券", f"# 数据来源: {source}"]
+                lines.append(df.head(limit).to_csv(index=False, float_format="%.2f").strip())
+                return "\n".join(lines)
         else:
             if market == "sh":
                 df = get_data_manager().fetch_akshare(ak.stock_margin_sse, start_date="", end_date="", ttl=1800)
@@ -297,6 +284,8 @@ def stock_margin_trading(
             lines = [f"# {market_name}融资融券", f"# 数据来源: akshare"]
             lines.append(df.to_csv(index=False, float_format="%.2f").strip())
             return "\n".join(lines)
+    except AllSourcesFailed:
+        raise  # 个股融资融券三源全失败：按契约向上抛，不吞成错误字符串
     except Exception as exc:
         return f"获取融资融券数据失败: {exc}"
 

@@ -20,6 +20,25 @@ print(stock_realtime(symbol="01810.HK", market="hk"))
 
 工具函数返回文本结果，表格类数据通常以 CSV 形式输出，便于直接展示、写入文件或交给上层应用继续处理。
 
+### 类型化数据 API（OpenStockDataClient）
+
+除文本工具外，库还提供类型化的 `OpenStockDataClient`。它以声明式静态路由 + 单一执行器实现多数据源故障转移，返回结构化的 `FetchResult`（含 `data` / `source` / `from_cache` / `attempts`），失败时抛 `AllSourcesFailed`（不返回 None 或错误字符串）：
+
+```python
+from open_stock_data import get_default_client
+
+client = get_default_client()
+
+bars = client.daily_prices("600519", market="sh", days=30)   # FetchResult[DataFrame]，英文标准列
+print(bars.source, bars.from_cache, len(bars.data))
+
+quote = client.realtime_quote("600519", "sh")                # FetchResult[UnifiedRealtimeQuote]
+batch = client.batch_realtime_quotes(["600519", "000001"])   # BatchFetchResult，支持部分成功
+flow = client.fund_flow("600519")                            # 分析类：源生列
+```
+
+价格/快照返回英文标准列（date/open/close…）；资金流、板块、估值等分析类数据返回数据源原生列（多为中文）。文本工具即是这层 API 之上的展示适配器。
+
 ## 支持的代码格式
 
 工具会在内部对常见股票代码格式做标准化，主要影响 `stock_prices`、`stock_realtime`、`stock_info`、`stock_indicators` 等函数。
@@ -86,7 +105,7 @@ export ALPHA_VANTAGE_API_KEY="your-api-key"
 **优先级调整说明**:
 - **TickFlow 降低优先级**: 限流严格（10次/分钟），批量场景易触发熔断，现调整到 Tushare 之后
 - **Efinance 提升优先级**: 稳定性好，无明确限流，适合批量数据获取和全市场扫描
-- **性能影响**: 全市场快照成功率从 85% 提升至 98%+，连接中断错误减少 88%
+- **预期收益**: 优先使用更稳定的 Efinance 可减少批量场景下的限流熔断；实际收益随网络与时段而定，暂无可复现基准数据
 
 **注意**:
 - TickFlow 未配置 API key 时仅用于免费日线，实时行情自动回退到其他源
@@ -119,7 +138,7 @@ export ENABLE_EASTMONEY_PATCH=true
 - 最小间隔从 0.35s 增加到 0.8s
 - 并发数从 3 降低到 2
 - 重试次数从 2 增加到 3
-- **效果**: 连接中断错误减少 70%+，全市场快照成功率提升至 98%+
+- **预期效果**: 降低东方财富连接中断频率、提升全市场快照稳定性；暂无可复现基准数据支撑具体百分比
 
 补丁作用于共享的 `requests.Session.request` 层，因此同时覆盖项目自身请求和依赖库中触发的东方财富请求。
 

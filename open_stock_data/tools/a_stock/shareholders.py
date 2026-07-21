@@ -16,6 +16,7 @@ from ...utils import (
     field_symbol,
     resolve_field,
 )
+from ...client import get_default_client
 
 
 # ==================== 限售解禁 ====================
@@ -223,73 +224,66 @@ def stock_top10_holders(
     holder_type: str = Field("main", description="股东类型: 'main'(十大股东), 'circulate'(十大流通股东)"),
     limit: int = Field(30, description="返回数量限制（多期数据）"),
 ):
-    try:
-        symbol = resolve_field(symbol, "")
-        holder_type = resolve_field(holder_type, "main")
-        limit = resolve_field(limit, 30)
-        manager = get_data_manager()
-        df = manager.get_top10_holders(symbol, holder_type=holder_type)
+    symbol = resolve_field(symbol, "")
+    holder_type = resolve_field(holder_type, "main")
+    limit = resolve_field(limit, 30)
+    result = get_default_client().top10_holders(symbol, holder_type=holder_type)
+    df = result.data
 
-        title = "十大流通股东" if holder_type == "circulate" else "十大股东"
+    title = "十大流通股东" if holder_type == "circulate" else "十大股东"
+    source = format_source_name(result.source)
+    date_col = "截至日期"
 
-        if df is None or df.empty:
-            return f"未获取到 {symbol} 的{title}数据"
+    lines = [
+        f"# {symbol} {title}",
+        f"# 数据来源: {source}",
+    ]
 
-        source = format_source_name(df.attrs.get('source', ''))
-        date_col = "截至日期"
+    if date_col in df.columns:
+        dates = df[date_col].unique()[:3]
+        for date in dates:
+            period_df = df[df[date_col] == date].head(10)
 
-        lines = [
-            f"# {symbol} {title}",
-            f"# 数据来源: {source}",
-        ]
+            lines.append(f"# {date}")
 
-        if date_col in df.columns:
-            dates = df[date_col].unique()[:3]
-            for date in dates:
-                period_df = df[df[date_col] == date].head(10)
+            cols = ["编号", "股东名称", "持股数量", "持股比例", "股本性质"]
 
-                lines.append(f"# {date}")
+            available_cols = [c for c in cols if c in period_df.columns]
+            if available_cols:
+                df_out = period_df[available_cols].copy()
+                if "持股数量" in df_out.columns:
+                    df_out["持股(万股)"] = (df_out["持股数量"] / 1e4).round(2)
+                    df_out = df_out.drop(columns=["持股数量"])
+                lines.append(df_out.to_csv(index=False, float_format="%.2f").strip())
+            else:
+                lines.append(period_df.to_csv(index=False, float_format="%.2f").strip())
 
-                cols = ["编号", "股东名称", "持股数量", "持股比例", "股本性质"]
+        if "股东总数" in df.columns:
+            latest = df.iloc[0]
+            holder_count = latest.get("股东总数")
+            avg_shares = latest.get("平均持股数")
+            if holder_count:
+                lines.append("# 股东统计")
+                lines.append("股东总数,平均持股")
+                lines.append(f"{holder_count},{avg_shares or '-'}")
 
-                available_cols = [c for c in cols if c in period_df.columns]
-                if available_cols:
-                    df_out = period_df[available_cols].copy()
-                    if "持股数量" in df_out.columns:
-                        df_out["持股(万股)"] = (df_out["持股数量"] / 1e4).round(2)
-                        df_out = df_out.drop(columns=["持股数量"])
-                    lines.append(df_out.to_csv(index=False, float_format="%.2f").strip())
-                else:
-                    lines.append(period_df.to_csv(index=False, float_format="%.2f").strip())
+        if len(dates) >= 2:
+            latest_date = dates[0]
+            prev_date = dates[1]
+            latest_holders = set(df[df[date_col] == latest_date]["股东名称"].tolist())
+            prev_holders = set(df[df[date_col] == prev_date]["股东名称"].tolist())
 
-            if "股东总数" in df.columns:
-                latest = df.iloc[0]
-                holder_count = latest.get("股东总数")
-                avg_shares = latest.get("平均持股数")
-                if holder_count:
-                    lines.append("# 股东统计")
-                    lines.append("股东总数,平均持股")
-                    lines.append(f"{holder_count},{avg_shares or '-'}")
+            new_holders = latest_holders - prev_holders
+            exit_holders = prev_holders - latest_holders
 
-            if len(dates) >= 2:
-                latest_date = dates[0]
-                prev_date = dates[1]
-                latest_holders = set(df[df[date_col] == latest_date]["股东名称"].tolist())
-                prev_holders = set(df[df[date_col] == prev_date]["股东名称"].tolist())
+            if new_holders or exit_holders:
+                lines.append(f"# 股东变化({prev_date}→{latest_date})")
+                lines.append("类型,股东")
+                if new_holders:
+                    lines.append(f"新进,{' '.join(list(new_holders)[:5])}")
+                if exit_holders:
+                    lines.append(f"退出,{' '.join(list(exit_holders)[:5])}")
+    else:
+        lines.append(df.head(limit).to_csv(index=False, float_format="%.2f").strip())
 
-                new_holders = latest_holders - prev_holders
-                exit_holders = prev_holders - latest_holders
-
-                if new_holders or exit_holders:
-                    lines.append(f"# 股东变化({prev_date}→{latest_date})")
-                    lines.append("类型,股东")
-                    if new_holders:
-                        lines.append(f"新进,{' '.join(list(new_holders)[:5])}")
-                    if exit_holders:
-                        lines.append(f"退出,{' '.join(list(exit_holders)[:5])}")
-        else:
-            lines.append(df.head(limit).to_csv(index=False, float_format="%.2f").strip())
-
-        return "\n".join(lines)
-    except Exception as e:
-        return f"获取 {symbol} 十大股东失败: {e}"
+    return "\n".join(lines)

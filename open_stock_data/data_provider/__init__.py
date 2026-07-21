@@ -12,12 +12,16 @@
 - YfinanceFetcher (优先级 5): Yahoo Finance 全局后备
 
 使用示例:
-    from open_stock_data.data_provider import DataFetcherManager
+    from open_stock_data import get_default_client
 
-    manager = DataFetcherManager()
-    df = manager.get_daily_data("600519", days=30)
-    quote = manager.get_realtime_quote("600519")
-    chip = manager.get_chip_distribution("600519")
+    client = get_default_client()
+    prices = client.daily_prices("600519", days=30)
+    quote = client.realtime_quote("600519")
+    chip = client.chip_distribution("600519")
+
+DataFetcherManager 仍保留缓存工具（fetch_akshare / fetch_with_cache）、状态查询
+（get_status）与美股多源方法；日线/实时/资金流/板块等失败转移已由
+OpenStockDataClient + RouteExecutor 的静态路由承担。
 """
 
 from .types import (

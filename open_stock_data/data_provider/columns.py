@@ -9,6 +9,8 @@ STANDARD_COLUMNS = ['date', 'open', 'high', 'low', 'close', 'volume', 'amount', 
 
 # 英文列名 → 中文列名
 COLUMN_MAPPING_TO_CN = {
+    'code': '代码',
+    'name': '名称',
     'date': '日期',
     'open': '开盘',
     'high': '最高',
@@ -17,6 +19,9 @@ COLUMN_MAPPING_TO_CN = {
     'volume': '成交量',
     'amount': '成交额',
     'pct_chg': '涨跌幅',
+    'price': '最新价',
+    'change_amount': '涨跌额',
+    'pre_close': '昨收',
     'turnover_rate': '换手率',
     'pe_ratio': '市盈率',
     'pb_ratio': '市净率',

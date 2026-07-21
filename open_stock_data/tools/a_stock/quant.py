@@ -10,12 +10,13 @@ from datetime import datetime, timedelta
 from pydantic import Field
 
 from ...utils import (
-    get_data_manager,
     format_source_name,
     field_symbol,
     resolve_field,
 )
+from ...client import get_default_client
 from ...data_provider import to_chinese_columns
+from ...exceptions import AllSourcesFailed
 from ...indicators import add_technical_indicators
 
 
@@ -41,15 +42,10 @@ def backtest_strategy(
         if not isinstance(start_date, str) or not start_date:
             start_date = (datetime.now() - timedelta(days=365)).strftime("%Y%m%d")
 
-        manager = get_data_manager()
-        days = (datetime.strptime(end_date, "%Y%m%d") - datetime.strptime(start_date, "%Y%m%d")).days + 60
-        df = manager.get_daily_data(symbol, days=days)
-
-        if df is None or df.empty:
-            return f"未获取到 {symbol} 的历史数据"
-
-        source = format_source_name(df.attrs.get('source', ''))
-        df = to_chinese_columns(df)
+        manager_days = (datetime.strptime(end_date, "%Y%m%d") - datetime.strptime(start_date, "%Y%m%d")).days + 60
+        result = get_default_client().daily_prices(symbol, days=manager_days)
+        source = format_source_name(result.source)
+        df = to_chinese_columns(result.data.copy())
 
         df.index = pd.to_datetime(df["日期"], errors="coerce")
         start_dt = pd.to_datetime(start_date)
@@ -207,5 +203,7 @@ def backtest_strategy(
         lines.append("注意: 回测结果仅供参考，历史表现不代表未来收益")
 
         return "\n".join(lines)
+    except AllSourcesFailed:
+        raise  # 数据源全部失败：按契约向上抛，不吞成错误字符串
     except Exception as e:
         return f"回测 {symbol} 失败: {e}"

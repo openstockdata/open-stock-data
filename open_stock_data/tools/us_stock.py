@@ -18,6 +18,8 @@ from ..utils import (
     ALPHA_VANTAGE_API_KEY,
     resolve_field,
 )
+from ..client import get_default_client
+from ..exceptions import AllSourcesFailed
 from ..data_provider import to_chinese_columns, normalize_stock_code
 from ..indicators import add_technical_indicators, STOCK_PRICE_COLUMNS
 
@@ -174,11 +176,10 @@ def stock_overview_us(
 ):
     try:
         symbol = resolve_field(symbol, "")
-        manager = get_data_manager()
-        overview = manager.get_us_company_overview(symbol)
-        if overview is None:
-            return f"未获取到 {symbol} 的公司概览数据"
-        return manager.format_us_overview_report(overview)
+        overview = get_default_client().us_overview(symbol).data
+        return get_data_manager().format_us_overview_report(overview)
+    except AllSourcesFailed:
+        raise
     except Exception as e:
         _LOGGER.warning(f"获取美股公司概览失败: {e}")
         return f"获取 {symbol} 公司概览失败: {e}"
@@ -195,21 +196,21 @@ def stock_financials_us(
         symbol = resolve_field(symbol, "")
         report_type = resolve_field(report_type, "balance_sheet")
         quarterly = resolve_field(quarterly, True)
-        manager = get_data_manager()
+        client = get_default_client()
 
         if report_type == "balance_sheet":
-            data = manager.get_us_balance_sheet(symbol, quarterly)
+            data = client.us_balance_sheet(symbol, quarterly).data
             title = "资产负债表"
         elif report_type == "income_statement":
-            data = manager.get_us_income_statement(symbol, quarterly)
+            data = client.us_income_statement(symbol, quarterly).data
             title = "利润表"
         elif report_type == "cash_flow":
-            data = manager.get_us_cash_flow(symbol, quarterly)
+            data = client.us_cash_flow(symbol, quarterly).data
             title = "现金流量表"
         else:
             return f"不支持的报表类型: {report_type}"
 
-        if data is None or not data.get("reports"):
+        if not data.get("reports"):
             return f"未获取到 {symbol} 的{title}数据"
 
         period_type = "季度" if quarterly else "年度"
@@ -264,6 +265,8 @@ def stock_financials_us(
             lines.append(",".join(values))
 
         return "\n".join(lines)
+    except AllSourcesFailed:
+        raise
     except Exception as e:
         _LOGGER.warning(f"获取美股财务报表失败: {e}")
         return f"获取 {symbol} 财务报表失败: {e}"
@@ -283,15 +286,14 @@ def stock_news_us(
         symbol = resolve_field(symbol, "")
         topics = resolve_field(topics, "")
         limit = resolve_field(limit, 20)
-        manager = get_data_manager()
-        news_data = manager.get_us_news_sentiment(
+        news_data = get_default_client().us_news_sentiment(
             symbol=symbol if isinstance(symbol, str) and symbol else None,
             topics=topics if isinstance(topics, str) and topics else None,
-            limit=min(limit, 50)
-        )
-        if news_data is None:
-            return "未获取到新闻数据"
-        return manager.format_us_news_report(news_data, limit)
+            limit=min(limit, 50),
+        ).data
+        return get_data_manager().format_us_news_report(news_data, limit)
+    except AllSourcesFailed:
+        raise
     except Exception as e:
         _LOGGER.warning(f"获取美股新闻情绪失败: {e}")
         return f"获取新闻情绪失败: {e}"
@@ -304,10 +306,7 @@ def stock_earnings_us(
 ):
     try:
         symbol = resolve_field(symbol, "")
-        manager = get_data_manager()
-        data = manager.get_us_earnings(symbol)
-        if data is None:
-            return f"未获取到 {symbol} 的盈利数据"
+        data = get_default_client().us_earnings(symbol).data
 
         lines = [f"# {symbol} 盈利数据"]
 
@@ -332,6 +331,8 @@ def stock_earnings_us(
                 lines.append(f"{date},{reported},{estimated},{surprise}")
 
         return "\n".join(lines)
+    except AllSourcesFailed:
+        raise
     except Exception as e:
         _LOGGER.warning(f"获取美股盈利数据失败: {e}")
         return f"获取 {symbol} 盈利数据失败: {e}"
@@ -346,10 +347,7 @@ def stock_insider_us(
     try:
         symbol = resolve_field(symbol, "")
         limit = resolve_field(limit, 20)
-        manager = get_data_manager()
-        data = manager.get_us_insider_transactions(symbol)
-        if data is None:
-            return f"未获取到 {symbol} 的内部交易数据"
+        data = get_default_client().us_insider(symbol).data
 
         transactions = data.get("data", [])
         if not transactions:
@@ -385,6 +383,8 @@ def stock_insider_us(
         lines.extend([",".join(row) for row in insider_rows])
 
         return "\n".join(lines)
+    except AllSourcesFailed:
+        raise
     except Exception as e:
         _LOGGER.warning(f"获取美股内部交易失败: {e}")
         return f"获取 {symbol} 内部交易失败: {e}"
@@ -408,10 +408,9 @@ def stock_tech_indicators_us(
         interval = resolve_field(interval, "daily")
         time_period = resolve_field(time_period, 14)
         limit = resolve_field(limit, 30)
-        manager = get_data_manager()
-        data = manager.get_us_technical_indicator(symbol, indicator, interval, time_period)
+        data = get_default_client().us_tech_indicator(symbol, indicator, interval, time_period).data
 
-        if data is None or not data.get("data"):
+        if not data.get("data"):
             return f"未获取到 {symbol} 的 {indicator} 指标数据"
 
         lines = [
@@ -456,6 +455,8 @@ def stock_tech_indicators_us(
         lines.extend([",".join(row) for row in rows])
 
         return "\n".join(lines)
+    except AllSourcesFailed:
+        raise
     except Exception as e:
         _LOGGER.warning(f"获取美股技术指标失败: {e}")
         return f"获取 {symbol} {indicator} 指标失败: {e}"

@@ -4,7 +4,7 @@
 提供细粒度的异常分类，便于针对性处理和重试。
 """
 
-from typing import Optional
+from typing import Any, Mapping, Optional, Sequence
 
 
 class StockDataError(Exception):
@@ -78,6 +78,38 @@ class EmptyDataError(DataValidationError):
 class DataParseError(DataValidationError):
     """数据解析错误"""
     pass
+
+
+class RouteNotFoundError(StockDataError):
+    """No static route exists for an operation and market."""
+
+
+class AllSourcesFailed(DataFetchError):
+    """Every eligible source in a route failed or returned unusable data."""
+
+    def __init__(
+        self,
+        operation: str,
+        attempts: Sequence[Any],
+        request: Optional[Mapping[str, Any]] = None,
+    ):
+        self.operation = operation
+        self.attempts = tuple(attempts)
+        self.request = dict(request or {})
+        sources = ", ".join(getattr(item, "source", "unknown") for item in attempts)
+        detail = f"所有数据源失败: operation={operation}"
+        if sources:
+            detail += f", sources={sources}"
+        super().__init__(detail)
+
+
+class BatchIncomplete(DataFetchError):
+    """A strict batch request contains one or more failed items."""
+
+    def __init__(self, result: Any):
+        self.result = result
+        failed = ", ".join(result.failures)
+        super().__init__(f"批量请求未完整成功: {failed}")
 
 
 # ==================== 异常分类 ====================

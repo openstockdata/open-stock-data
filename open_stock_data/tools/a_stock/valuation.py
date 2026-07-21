@@ -17,6 +17,7 @@ from ...utils import (
     recent_trade_date,
     resolve_field,
 )
+from ...client import get_default_client
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -105,50 +106,43 @@ def stock_market_pe_percentile():
 def stock_industry_pe(
     date: str = Field("", description="日期(可选)，格式: 20250210，默认最新"),
 ):
-    try:
-        if not isinstance(date, str) or not date:
-            date = recent_trade_date().strftime("%Y%m%d")
+    if not isinstance(date, str) or not date:
+        date = recent_trade_date().strftime("%Y%m%d")
 
-        manager = get_data_manager()
-        df = manager.get_industry_pe(date)
+    result = get_default_client().industry_pe(date)
+    df = result.data
+    source = format_source_name(result.source)
+    data_date = str(df.attrs.get('data_date') or date)
+    requested_date = str(df.attrs.get('requested_date') or date)
 
-        if df is None or df.empty:
-            return f"获取行业PE数据失败，日期: {date}"
+    df_l1 = df[df["行业层级"] == 1.0].copy()
+    if df_l1.empty:
+        df_l1 = df.head(20)
 
-        source = format_source_name(df.attrs.get('source', ''))
-        data_date = str(df.attrs.get('data_date') or date)
-        requested_date = str(df.attrs.get('requested_date') or date)
+    df_l1 = df_l1.sort_values("静态市盈率-加权平均", ascending=True)
 
-        df_l1 = df[df["行业层级"] == 1.0].copy()
-        if df_l1.empty:
-            df_l1 = df.head(20)
+    lines = [
+        "# A股行业PE对比",
+        f"# 数据来源: {source}",
+        f"# 数据日期: {data_date}",
+    ]
+    if requested_date and requested_date != data_date:
+        lines.append(f"# 请求日期: {requested_date}")
 
-        df_l1 = df_l1.sort_values("静态市盈率-加权平均", ascending=True)
+    cols = ["行业名称", "公司数量", "静态市盈率-加权平均", "静态市盈率-中位数"]
+    df_out = df_l1[cols].copy()
+    df_out.columns = ["行业", "公司数", "加权PE", "中位PE"]
+    lines.append(df_out.to_csv(index=False, float_format="%.2f").strip())
 
-        lines = [
-            "# A股行业PE对比",
-            f"# 数据来源: {source}",
-            f"# 数据日期: {data_date}",
-        ]
-        if requested_date and requested_date != data_date:
-            lines.append(f"# 请求日期: {requested_date}")
+    # 估值提示
+    low_pe = df_l1.head(3)["行业名称"].tolist()
+    high_pe = df_l1.tail(3)["行业名称"].tolist()
+    lines.append("# 估值提示")
+    lines.append("类型,行业")
+    lines.append(f"低估值行业,{' '.join(low_pe)}")
+    lines.append(f"高估值行业,{' '.join(high_pe)}")
 
-        cols = ["行业名称", "公司数量", "静态市盈率-加权平均", "静态市盈率-中位数"]
-        df_out = df_l1[cols].copy()
-        df_out.columns = ["行业", "公司数", "加权PE", "中位PE"]
-        lines.append(df_out.to_csv(index=False, float_format="%.2f").strip())
-
-        # 估值提示
-        low_pe = df_l1.head(3)["行业名称"].tolist()
-        high_pe = df_l1.tail(3)["行业名称"].tolist()
-        lines.append("# 估值提示")
-        lines.append("类型,行业")
-        lines.append(f"低估值行业,{' '.join(low_pe)}")
-        lines.append(f"高估值行业,{' '.join(high_pe)}")
-
-        return "\n".join(lines)
-    except Exception as e:
-        return f"获取行业PE对比失败: {e}"
+    return "\n".join(lines)
 
 
 # ==================== 分红历史 ====================
@@ -157,43 +151,36 @@ def stock_dividend_history(
     symbol: str = field_symbol,
     limit: int = Field(10, description="返回数量限制"),
 ):
-    try:
-        symbol = resolve_field(symbol, "")
-        limit = resolve_field(limit, 10)
-        manager = get_data_manager()
-        df = manager.get_dividend_history(symbol)
+    symbol = resolve_field(symbol, "")
+    limit = resolve_field(limit, 10)
+    result = get_default_client().dividend_history(symbol)
 
-        if df is None or df.empty:
-            return f"未获取到 {symbol} 的分红历史数据"
+    source = format_source_name(result.source)
+    lines = [f"# {symbol} 分红历史", f"# 数据来源: {source}"]
 
-        source = format_source_name(df.attrs.get('source', ''))
-        lines = [f"# {symbol} 分红历史", f"# 数据来源: {source}"]
+    df = result.data.head(limit)
 
-        df = df.head(limit)
+    dividend_header = ["公告日期", "送股", "转增", "派息(元/10股)", "进度", "除权除息日"]
+    dividend_rows = []
+    has_valid_data = False
+    for _, row in df.iterrows():
+        date = str(row.get("公告日期", "-"))[:10]
+        song = row.get("送股", 0) or 0
+        zhuan = row.get("转增", 0) or 0
+        pai = row.get("派息", 0) or 0
+        status = row.get("进度", "-")
+        ex_date = str(row.get("除权除息日", "-"))[:10] if pd.notna(row.get("除权除息日")) else "-"
+        if pai > 0 or song > 0 or zhuan > 0:
+            has_valid_data = True
+        dividend_rows.append([date, str(song), str(zhuan), f"{pai:.2f}", str(status), ex_date])
 
-        dividend_header = ["公告日期", "送股", "转增", "派息(元/10股)", "进度", "除权除息日"]
-        dividend_rows = []
-        has_valid_data = False
-        for _, row in df.iterrows():
-            date = str(row.get("公告日期", "-"))[:10]
-            song = row.get("送股", 0) or 0
-            zhuan = row.get("转增", 0) or 0
-            pai = row.get("派息", 0) or 0
-            status = row.get("进度", "-")
-            ex_date = str(row.get("除权除息日", "-"))[:10] if pd.notna(row.get("除权除息日")) else "-"
-            if pai > 0 or song > 0 or zhuan > 0:
-                has_valid_data = True
-            dividend_rows.append([date, str(song), str(zhuan), f"{pai:.2f}", str(status), ex_date])
+    if not has_valid_data:
+        _LOGGER.warning(f"[stock_dividend_history] {symbol} 分红数据字段全为空, 列名: {list(df.columns)}")
 
-        if not has_valid_data:
-            _LOGGER.warning(f"[stock_dividend_history] {symbol} 分红数据字段全为空, 列名: {list(df.columns)}")
+    lines.append(",".join(dividend_header))
+    lines.extend([",".join(row) for row in dividend_rows])
 
-        lines.append(",".join(dividend_header))
-        lines.extend([",".join(row) for row in dividend_rows])
-
-        return "\n".join(lines)
-    except Exception as e:
-        return f"获取 {symbol} 分红历史失败: {e}"
+    return "\n".join(lines)
 
 
 # ==================== 基金持仓 ====================
@@ -202,56 +189,47 @@ def stock_institutional_holdings(
     date: str = Field("", description="报告期，格式: 20240930，默认最新季度"),
     limit: int = Field(30, description="返回数量限制"),
 ):
-    try:
-        date = resolve_field(date, "")
-        limit = resolve_field(limit, 30)
+    date = resolve_field(date, "")
+    limit = resolve_field(limit, 30)
 
-        manager = get_data_manager()
-        df = manager.get_fund_holder("", date=date)
+    result = get_default_client().fund_holder("", date=date)
+    df = result.data.head(limit)
+    source = format_source_name(result.source)
 
-        if df is None or df.empty:
-            return "未获取到基金持仓数据"
+    lines = [
+        "# 基金重仓股",
+        f"# 数据来源: {source}",
+    ]
 
-        source = format_source_name(df.attrs.get('source', ''))
+    cols = ["股票代码", "股票简称", "持有基金家数", "持股总数", "持股市值", "持股变化", "持股变动比例"]
+    available_cols = [c for c in cols if c in df.columns]
 
-        df = df.head(limit)
+    if available_cols:
+        df_out = df[available_cols].copy()
+        if "持股市值" in df_out.columns:
+            df_out["持股市值"] = (df_out["持股市值"] / 1e8).round(2)
+        if "持股总数" in df_out.columns:
+            df_out["持股总数"] = (df_out["持股总数"] / 1e4).round(2)
+        rename_map = {
+            "股票代码": "代码", "股票简称": "名称", "持有基金家数": "基金数",
+            "持股总数": "持股(万)", "持股市值": "市值(亿)",
+            "持股变化": "变化", "持股变动比例": "变动%",
+        }
+        df_out = df_out.rename(columns=rename_map)
+        lines.append(df_out.to_csv(index=False, float_format="%.2f").strip())
+    else:
+        lines.append(df.to_csv(index=False, float_format="%.2f").strip())
 
-        lines = [
-            f"# 基金重仓股",
-            f"# 数据来源: {source}",
-        ]
+    # 持仓变化统计
+    if "持股变化" in df.columns:
+        increase = len(df[df["持股变化"] == "增仓"])
+        decrease = len(df[df["持股变化"] == "减仓"])
+        new_hold = len(df[df["持股变化"] == "新进"])
+        lines.append("# 持仓变化统计")
+        lines.append("增仓,减仓,新进")
+        lines.append(f"{increase},{decrease},{new_hold}")
 
-        cols = ["股票代码", "股票简称", "持有基金家数", "持股总数", "持股市值", "持股变化", "持股变动比例"]
-        available_cols = [c for c in cols if c in df.columns]
-
-        if available_cols:
-            df_out = df[available_cols].copy()
-            if "持股市值" in df_out.columns:
-                df_out["持股市值"] = (df_out["持股市值"] / 1e8).round(2)
-            if "持股总数" in df_out.columns:
-                df_out["持股总数"] = (df_out["持股总数"] / 1e4).round(2)
-            rename_map = {
-                "股票代码": "代码", "股票简称": "名称", "持有基金家数": "基金数",
-                "持股总数": "持股(万)", "持股市值": "市值(亿)",
-                "持股变化": "变化", "持股变动比例": "变动%",
-            }
-            df_out = df_out.rename(columns=rename_map)
-            lines.append(df_out.to_csv(index=False, float_format="%.2f").strip())
-        else:
-            lines.append(df.to_csv(index=False, float_format="%.2f").strip())
-
-        # 持仓变化统计
-        if "持股变化" in df.columns:
-            increase = len(df[df["持股变化"] == "增仓"])
-            decrease = len(df[df["持股变化"] == "减仓"])
-            new_hold = len(df[df["持股变化"] == "新进"])
-            lines.append("# 持仓变化统计")
-            lines.append("增仓,减仓,新进")
-            lines.append(f"{increase},{decrease},{new_hold}")
-
-        return "\n".join(lines)
-    except Exception as e:
-        return f"获取基金持仓失败: {e}"
+    return "\n".join(lines)
 
 
 # ==================== 财报日历 ====================

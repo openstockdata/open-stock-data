@@ -24,6 +24,7 @@ dependencies = [
 test = [
     "pytest>=8.0.0",
     "pytest-timeout>=2.3.0",
+    "pytest-cov>=5.0.0",
 ]
 
 [project.urls]
@@ -51,3 +52,16 @@ markers = [
     "network: 需要网络访问的测试",
     "requires_alpha_vantage: 依赖 Alpha Vantage API Key 的测试",
 ]
+
+# 覆盖率只针对新的路由/契约/客户端核心（数据源/美股/单源工具依赖网络，另行集成测试）。
+# 门槛（fail_under=90）在 coverage 侧，运行方式：
+#   COVERAGE_CORE=sysmon uv run pytest tests/ -m "not network" \
+#       --cov=open_stock_data.client --cov=open_stock_data.data_provider.routing \
+#       --cov=open_stock_data.data_provider.contracts --cov=open_stock_data.data_provider.default_routes
+# 默认 addopts 不挂 --cov，避免 coverage tracer 与本机 numpy 2.4 的 C 扩展冲突拖垮日常测试。
+[tool.coverage.run]
+core = "sysmon"  # 用 Python 3.12+ sys.monitoring，规避 C tracer 与 numpy 2.4+ 冲突
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true

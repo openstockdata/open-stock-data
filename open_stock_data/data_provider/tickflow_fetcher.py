@@ -16,7 +16,6 @@ import requests
 from .base import BaseFetcher, NETWORK_EXCEPTIONS
 from .types import RealtimeSource, UnifiedRealtimeQuote, safe_float
 from ..exceptions import AuthenticationError, DataFetchError, RateLimitError
-from .capability_definitions import create_tickflow_capability
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,7 +38,6 @@ class TickflowFetcher(BaseFetcher):
         default_url = self.DEFAULT_API_URL if self._api_key else self.DEFAULT_FREE_API_URL
         self._base_url = (configured_url or default_url).rstrip("/")
         self._available = True
-        self.capability = create_tickflow_capability()
         if self._api_key:
             _LOGGER.info("TickFlow 初始化成功: %s", self._base_url)
         else:

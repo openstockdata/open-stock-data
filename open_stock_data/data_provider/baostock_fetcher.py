@@ -12,7 +12,6 @@ import pandas as pd
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from .base import BaseFetcher, DataFetchError, NETWORK_EXCEPTIONS
-from .capability_definitions import create_baostock_capability
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,7 +26,6 @@ class BaostockFetcher(BaseFetcher):
     def __init__(self):
         super().__init__()
         self._bs = None
-        self.capability = create_baostock_capability()
 
         # 延迟导入
         try:
