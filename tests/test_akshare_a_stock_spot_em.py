@@ -1,26 +1,25 @@
 import requests
 
+from open_stock_data.data_provider import akshare_fetcher as module
 from open_stock_data.data_provider.akshare_fetcher import AkshareFetcher
 
 
-class _DummyResponse:
+class DummyResponse:
     def __init__(self, payload):
-        self.status_code = 200
-        self._payload = payload
+        self.payload = payload
 
     def raise_for_status(self):
         return None
 
     def json(self):
-        return self._payload
+        return self.payload
 
 
-def _page_payload(page_no, total=6):
-    base = page_no * 1000
-    diff = []
+def page_payload(page_no, total=6):
+    rows = []
     for index in range(2):
-        code = f"{base + index:06d}"
-        diff.append(
+        code = f"{page_no * 1000 + index:06d}"
+        rows.append(
             {
                 "f2": 10 + index,
                 "f3": 1.5 - index,
@@ -51,117 +50,68 @@ def _page_payload(page_no, total=6):
                 "f152": "",
             }
         )
-    return {"data": {"total": total, "diff": diff}}
+    return {"total": total, "diff": rows}
 
 
-def test_fetch_a_stock_spot_em_paginated_retries_missing_pages(monkeypatch):
+def test_fetch_spot_page_retries_network_error(monkeypatch):
     fetcher = AkshareFetcher()
-    state = {"page2_calls": 0}
+    calls = 0
 
-    def fake_get(self, url, params=None, timeout=None, **kwargs):
-        page_no = int(params["pn"])
-        if page_no == 2:
-            state["page2_calls"] += 1
-            if state["page2_calls"] == 1:
-                raise requests.ConnectionError("remote closed")
-        return _DummyResponse(_page_payload(page_no))
+    def fake_get(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise requests.ConnectionError("remote closed")
+        return DummyResponse({"data": page_payload(1)})
 
-    monkeypatch.setattr(requests.Session, "get", fake_get)
-    monkeypatch.setattr("open_stock_data.data_provider.akshare_fetcher.time.sleep", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(fetcher, "random_sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(module.requests, "get", fake_get)
+    monkeypatch.setattr(module.time, "sleep", lambda *_args: None)
 
-    result = fetcher._fetch_a_stock_spot_em_paginated()
+    result = fetcher._fetch_em_spot_page(1, 100)
+
+    assert result == page_payload(1)
+    assert calls == 2
+
+
+def test_a_stock_snapshot_retries_missing_pages(monkeypatch):
+    fetcher = AkshareFetcher()
+    fetcher._EM_SPOT_PAGE_SIZE = 2
+    calls = {2: 0}
+
+    def fake_page(page, _page_size, **_kwargs):
+        if page == 2:
+            calls[2] += 1
+            if calls[2] == 1:
+                return None
+        return page_payload(page)
+
+    monkeypatch.setattr(fetcher, "_fetch_em_spot_page", fake_page)
+    monkeypatch.setattr(fetcher, "random_sleep", lambda *_args: None)
+    monkeypatch.setattr(module.time, "sleep", lambda *_args: None)
+
+    result = fetcher.get_a_stock_spot()
 
     assert result is not None
-    assert result.attrs["spot_cache_source"] == "akshare_em"
     assert len(result) == 6
-    assert state["page2_calls"] == 2
+    assert result.attrs["spot_complete"] is True
+    assert calls[2] == 2
 
 
-def test_fetch_a_stock_spot_em_paginated_returns_partial_when_pages_remain_missing(monkeypatch):
+def test_a_stock_snapshot_marks_partial_result(monkeypatch):
     fetcher = AkshareFetcher()
+    fetcher._EM_SPOT_PAGE_SIZE = 2
 
-    def fake_get(self, url, params=None, timeout=None, **kwargs):
-        page_no = int(params["pn"])
-        if page_no == 3:
-            raise requests.Timeout("timed out")
-        return _DummyResponse(_page_payload(page_no))
+    def fake_page(page, _page_size, **_kwargs):
+        if page == 3:
+            return None
+        return page_payload(page)
 
-    monkeypatch.setattr(requests.Session, "get", fake_get)
-    monkeypatch.setattr("open_stock_data.data_provider.akshare_fetcher.time.sleep", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(fetcher, "random_sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(fetcher, "_fetch_em_spot_page", fake_page)
+    monkeypatch.setattr(fetcher, "random_sleep", lambda *_args: None)
+    monkeypatch.setattr(module.time, "sleep", lambda *_args: None)
 
-    result = fetcher._fetch_a_stock_spot_em_paginated()
+    result = fetcher.get_a_stock_spot()
 
     assert result is not None
-    assert result.attrs["spot_cache_source"] == "akshare_em_partial"
-    assert result.attrs["spot_partial_pages"] == [3]
     assert len(result) == 4
-
-
-def test_a_stock_spot_page_schedule_slows_down_for_tail_pages():
-    fetcher = AkshareFetcher()
-
-    early = fetcher._get_a_stock_spot_page_schedule(page_no=10, total_page=59)
-    middle = fetcher._get_a_stock_spot_page_schedule(page_no=25, total_page=59)
-    late = fetcher._get_a_stock_spot_page_schedule(page_no=41, total_page=59)
-    tail = fetcher._get_a_stock_spot_page_schedule(page_no=55, total_page=59)
-
-    assert early.chunk_size == 10
-    assert middle.chunk_size == 6
-    assert middle.refresh_session is True
-    assert late.chunk_size == 2
-    assert tail.chunk_size == 1
-    assert tail.refresh_session is True
-    assert late.refresh_session is True
-    assert tail.inter_page_sleep[0] > late.inter_page_sleep[0] > middle.inter_page_sleep[0] > early.inter_page_sleep[0]
-
-
-def test_fetch_a_stock_spot_em_paginated_rotates_session_for_late_pages(monkeypatch):
-    fetcher = AkshareFetcher()
-    created_sessions = []
-
-    class DummySession:
-        def __init__(self):
-            self.closed = False
-            created_sessions.append(self)
-
-        def get(self, url, params=None, timeout=None, **kwargs):
-            return _DummyResponse(_page_payload(int(params["pn"]), total=320))
-
-        def close(self):
-            self.closed = True
-
-    monkeypatch.setattr("open_stock_data.data_provider.akshare_fetcher.requests.Session", DummySession)
-    monkeypatch.setattr("open_stock_data.data_provider.akshare_fetcher.time.sleep", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(fetcher, "random_sleep", lambda *_args, **_kwargs: None)
-
-    result = fetcher._fetch_a_stock_spot_em_paginated()
-
-    assert result is not None
-    assert result.attrs["spot_cache_source"] == "akshare_em"
-    assert len(created_sessions) >= 2
-    assert any(session.closed for session in created_sessions[:-1])
-
-
-def test_fetch_eastmoney_spot_page_rotates_host_on_retry(monkeypatch):
-    fetcher = AkshareFetcher()
-    calls = []
-
-    class DummySession:
-        def get(self, url, params=None, timeout=None, headers=None, **kwargs):
-            calls.append((url, headers))
-            if len(calls) == 1:
-                raise requests.ConnectionError("remote closed")
-            return _DummyResponse(_page_payload(41, total=5900))
-
-    monkeypatch.setattr(fetcher, "_get_eastmoney_spot_hosts", lambda: ("82.push2.eastmoney.com", "push2.eastmoney.com"))
-    monkeypatch.setattr("open_stock_data.data_provider.akshare_fetcher.time.sleep", lambda *_args, **_kwargs: None)
-
-    page_df, total = fetcher._fetch_eastmoney_spot_page(DummySession(), 41)
-
-    assert not page_df.empty
-    assert total == 5900
-    assert calls[0][0].startswith("https://82.push2.eastmoney.com/")
-    assert calls[1][0].startswith("https://push2.eastmoney.com/")
-    assert calls[0][1]["X-Open-Stock-No-Inner-Retry"] == "1"
+    assert result.attrs["spot_complete"] is False

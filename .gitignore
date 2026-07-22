@@ -20,3 +20,8 @@ uv.lock
 .claude/
 CLAUDE.md
 docs/
+
+# Local test artifacts (per-machine records, not source)
+.coverage
+tests/network_test_ledger.json
+tests/NETWORK_TEST_REPORT.md

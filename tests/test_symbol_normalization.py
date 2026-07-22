@@ -1,4 +1,5 @@
 import pandas as pd
+from datetime import datetime, timezone
 
 from open_stock_data.data_provider import (
     StockType,
@@ -8,6 +9,7 @@ from open_stock_data.data_provider import (
     normalize_stock_code,
     validate_stock_type,
 )
+from open_stock_data.data_provider.contracts import FetchResult
 from open_stock_data.data_provider import akshare_fetcher as akshare_fetcher_module
 from open_stock_data.data_provider.akshare_fetcher import AkshareFetcher
 from open_stock_data.tools.a_stock import info as info_module
@@ -38,28 +40,33 @@ def test_detect_stock_type_and_normalize_stock_code_support_common_formats():
     assert normalize_stock_code("brk.b", "us") == "BRK.B"
 
 
-class _DummyManager:
+class _DummyClient:
     def __init__(self):
         self.calls = []
 
-    def get_realtime_quote(self, stock_code, stock_type=None):
-        self.calls.append((stock_code, stock_type))
-        return UnifiedRealtimeQuote(
-            code=stock_code,
-            name="Test",
-            source=RealtimeSource.AKSHARE_EM,
-            price=10.0,
-            change_pct=1.2,
+    def realtime_quote(self, symbol, market=None):
+        normalized = normalize_stock_code(symbol, market)
+        self.calls.append((normalized, market))
+        return FetchResult(
+            data=UnifiedRealtimeQuote(
+                code=normalized,
+                name="Test",
+                source=RealtimeSource.AKSHARE_EM,
+                price=10.0,
+                change_pct=1.2,
+            ),
+            source="AkshareFetcher",
+            fetched_at=datetime.now(timezone.utc),
         )
 
 
 def test_stock_realtime_normalizes_hk_suffix_input(monkeypatch):
-    manager = _DummyManager()
-    monkeypatch.setattr(prices_module, "get_data_manager", lambda: manager)
+    client = _DummyClient()
+    monkeypatch.setattr(prices_module, "get_default_client", lambda: client)
 
     result = prices_module.stock_realtime(symbol="01810.HK", market="hk")
 
-    assert manager.calls == [("01810", StockType.HK)]
+    assert client.calls == [("01810", "hk")]
     assert "01810" in result
     assert "01810.HK.hk" not in result
 
@@ -67,16 +74,22 @@ def test_stock_realtime_normalizes_hk_suffix_input(monkeypatch):
 def test_stock_prices_normalizes_hk_suffix_input(monkeypatch):
     captured = {}
 
-    def fake_fetch(symbol, market, start_date, period):
-        captured.update(symbol=symbol, market=market, period=period)
-        return pd.DataFrame(
-            [
-                {"日期": "2026-03-26", "收盘": 10.0, "最低": 9.5, "最高": 10.5},
-                {"日期": "2026-03-27", "收盘": 10.2, "最低": 9.7, "最高": 10.6},
-            ]
-        )
+    class DummyPriceClient:
+        def daily_prices(self, symbol, market, *, days, period):
+            normalized = normalize_stock_code(symbol, market)
+            captured.update(symbol=normalized, market=market, period=period)
+            return FetchResult(
+                data=pd.DataFrame(
+                    [
+                        {"date": "2026-03-26", "close": 10.0, "low": 9.5, "high": 10.5},
+                        {"date": "2026-03-27", "close": 10.2, "low": 9.7, "high": 10.6},
+                    ]
+                ),
+                source="YfinanceFetcher",
+                fetched_at=datetime.now(timezone.utc),
+            )
 
-    monkeypatch.setattr(us_stock_module, "_fetch_global_prices", fake_fetch)
+    monkeypatch.setattr(prices_module, "get_default_client", lambda: DummyPriceClient())
     monkeypatch.setattr(prices_module, "add_technical_indicators", lambda *args, **kwargs: None)
     monkeypatch.setattr(prices_module, "STOCK_PRICE_COLUMNS", ["日期", "收盘", "最低", "最高"])
 
@@ -94,7 +107,7 @@ def test_stock_indicators_normalizes_hk_suffix_input(monkeypatch):
         captured["symbol"] = kwargs["symbol"]
         return pd.DataFrame([{"报告期": "2025Q4", "ROE": 12.3}])
 
-    monkeypatch.setattr(info_module, "ak_cache", fake_ak_cache)
+    monkeypatch.setattr(info_module, "get_data_manager", lambda: type("Manager", (), {"fetch_akshare": staticmethod(fake_ak_cache)})())
 
     result = info_module.stock_indicators(symbol="01810.HK", market="hk")
 
@@ -139,7 +152,7 @@ def test_stock_info_normalizes_hk_suffix_input(monkeypatch):
         captured["symbol"] = kwargs.get("symbol")
         return pd.DataFrame([{"item": "总市值", "value": "1000亿"}])
 
-    monkeypatch.setattr(info_module, "ak_cache", fake_ak_cache)
+    monkeypatch.setattr(info_module, "get_data_manager", lambda: type("Manager", (), {"fetch_akshare": staticmethod(fake_ak_cache)})())
 
     result = info_module.stock_info(symbol="01810.HK", market="hk")
 

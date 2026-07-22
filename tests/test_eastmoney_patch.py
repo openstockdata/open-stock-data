@@ -179,38 +179,3 @@ def test_push2_subdomain_uses_same_retry_policy(monkeypatch):
     assert response.status_code == 200
     assert len(calls) == 2
 
-
-def test_push2_can_disable_inner_retry_and_add_browser_headers(monkeypatch):
-    calls = []
-
-    def fake_original(self, method, url, **kwargs):
-        calls.append(kwargs.get("headers", {}))
-        raise requests.ConnectionError("remote closed")
-
-    monkeypatch.setattr(patch_module, "_ORIGINAL_SESSION_REQUEST", fake_original)
-    monkeypatch.setattr(patch_module, "_fetch_nid", lambda user_agent: None)
-    monkeypatch.setattr(patch_module, "_random_user_agent", lambda: "UA-1")
-    monkeypatch.setattr(
-        patch_module,
-        "_get_request_policy",
-        lambda url: patch_module._RequestPolicy(
-            sleep_range=(0.0, 0.0),
-            max_retries=5,
-            retry_backoff_seconds=0.0,
-        ),
-    )
-    monkeypatch.setattr(patch_module.time, "sleep", lambda *args, **kwargs: None)
-
-    patch_module.enable_eastmoney_patch()
-    session = requests.Session()
-    try:
-        session.get(
-            "https://82.push2.eastmoney.com/api/qt/clist/get",
-            headers={patch_module._NO_INNER_RETRY_HEADER: "1"},
-        )
-    except requests.ConnectionError:
-        pass
-
-    assert len(calls) == 1
-    assert calls[0]["Connection"] == "close"
-    assert calls[0]["Referer"] == "https://quote.eastmoney.com/center/gridlist.html#hs_a_board"

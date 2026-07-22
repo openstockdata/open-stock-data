@@ -78,6 +78,8 @@ def test_index_prices_falls_back_to_sina_when_eastmoney_unavailable(t):
     assert "000300 指数历史价格" in result
 
 
+@pytest.mark.a_stock
+@pytest.mark.network
 class TestAStockPrices:
     """A股价格数据测试"""
 

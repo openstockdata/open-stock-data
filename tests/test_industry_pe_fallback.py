@@ -59,17 +59,19 @@ def test_get_industry_pe_falls_back_to_previous_trade_date(monkeypatch):
 
 
 def test_stock_industry_pe_uses_actual_data_date(monkeypatch):
+    from open_stock_data.data_provider.contracts import FetchResult, utc_now
+
     df = _build_industry_pe_df()
     df.attrs["source"] = "akshare"
     df.attrs["requested_date"] = "20260325"
     df.attrs["data_date"] = "20260324"
 
-    class DummyManager:
-        def get_industry_pe(self, date: str):
+    class DummyClient:
+        def industry_pe(self, date: str):
             assert date == "20260325"
-            return df
+            return FetchResult(data=df, source="AkshareFetcher", fetched_at=utc_now())
 
-    monkeypatch.setattr(valuation_module, "get_data_manager", lambda: DummyManager())
+    monkeypatch.setattr(valuation_module, "get_default_client", lambda: DummyClient())
 
     result = valuation_module.stock_industry_pe(date="20260325")
 

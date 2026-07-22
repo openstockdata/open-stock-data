@@ -98,14 +98,15 @@ def test_check_rate_limit_is_shared_across_fetcher_instances(monkeypatch):
     fetcher_a = _build_fetcher()
     fetcher_b = _build_fetcher()
 
-    for _ in range(TushareFetcher.RATE_LIMIT):
+    effective_limit = TushareFetcher.RATE_LIMIT - TushareFetcher.RATE_SAFETY_MARGIN
+    for _ in range(effective_limit):
         fetcher_a._check_rate_limit()
 
     fetcher_b._check_rate_limit()
 
     assert len(sleep_calls) == 1
-    assert sleep_calls[0] == TushareFetcher.RATE_WINDOW
-    assert len(TushareFetcher._request_timestamps) == TushareFetcher.RATE_LIMIT
+    assert sleep_calls[0] == TushareFetcher.RATE_WINDOW + TushareFetcher.RATE_WAIT_BUFFER
+    assert len(TushareFetcher._request_timestamps) == 1
 
     _reset_tushare_rate_limit_state()
 
@@ -122,7 +123,8 @@ def test_check_rate_limit_prunes_requests_outside_window(monkeypatch):
 
     fetcher = _build_fetcher()
 
-    for _ in range(TushareFetcher.RATE_LIMIT):
+    effective_limit = TushareFetcher.RATE_LIMIT - TushareFetcher.RATE_SAFETY_MARGIN
+    for _ in range(effective_limit):
         fetcher._check_rate_limit()
 
     current_time += TushareFetcher.RATE_WINDOW + 1

@@ -21,6 +21,7 @@ open-stock-data 测试配置
 """
 
 import os
+import socket
 import pytest
 from pathlib import Path
 
@@ -39,6 +40,19 @@ if env_file.exists():
 
 # 设置默认值（如果未配置）
 os.environ.setdefault("LOG_LEVEL", "INFO")
+
+
+@pytest.fixture(autouse=True)
+def block_unmarked_network(request, monkeypatch):
+    """Make the offline suite deterministic by rejecting real socket connections."""
+    if request.node.get_closest_marker("network") is not None:
+        return
+
+    def blocked(*_args, **_kwargs):
+        raise RuntimeError("network access requires @pytest.mark.network")
+
+    monkeypatch.setattr(socket, "create_connection", blocked)
+    monkeypatch.setattr(socket.socket, "connect", blocked)
 
 
 # ==================== 导入工具函数 ====================
