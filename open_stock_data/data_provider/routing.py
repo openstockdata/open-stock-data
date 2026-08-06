@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -22,6 +23,8 @@ from .contracts import (
     RouteSpec,
     utc_now,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -138,6 +141,7 @@ class RouteExecutor:
                     attempts=tuple(attempts),
                 )
                 self._write_cache(cache_key, route, result)
+                self._run_persist(route, data, request, provider.name)
                 return result
             except RateLimitError as exc:
                 latency_ms = (time.monotonic() - started) * 1000
@@ -335,3 +339,14 @@ class RouteExecutor:
         physical_ttl = policy.current_ttl() + policy.max_stale_seconds
         entry = _CacheEntry(result.data, result.source, result.fetched_at, time.time())
         self._cache.set(key, entry, expire=max(physical_ttl, 1.0))
+
+    @staticmethod
+    def _run_persist(route: RouteSpec, data: Any, request: RouteRequest, source: str) -> None:
+        """成功取数后回写本地长期存储。钩子自行忽略本地源；异常只记日志不影响返回。"""
+        if route.persist is None:
+            return
+        try:
+            route.persist(data, request, source)
+        except Exception as exc:  # noqa: BLE001 - 持久化失败绝不影响数据返回
+            _LOGGER.warning("[persist] %s 回写失败: %s", route.operation.value, exc)
+

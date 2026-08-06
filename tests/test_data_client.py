@@ -6,6 +6,7 @@ from open_stock_data.data_provider.base import BaseFetcher
 from open_stock_data.data_provider.circuit_breaker import get_circuit_breaker
 from open_stock_data.data_provider.contracts import CachePolicy, Operation, RouteSpec
 from open_stock_data.data_provider.routing import RouteRegistry
+from open_stock_data.data_provider.local_store import LocalStore
 from open_stock_data.data_provider.stock_code import StockType
 from open_stock_data.data_provider.types import ChipDistribution, RealtimeSource, UnifiedRealtimeQuote
 from open_stock_data.exceptions import AllSourcesFailed, BatchIncomplete
@@ -86,9 +87,13 @@ def reset_breakers():
         get_circuit_breaker(name).reset()
 
 
+def _mem_store():
+    return LocalStore(path=":memory:")
+
+
 def test_daily_prices_returns_english_dataframe_and_metadata():
     fetcher = ClientFetcher("dummy", daily=pd.DataFrame([{"日期": "2026-01-01", "收盘": 10.0}]))
-    client = OpenStockDataClient({"dummy": fetcher}, client_routes(), cache=None)
+    client = OpenStockDataClient({"dummy": fetcher}, client_routes(), cache=None, store=_mem_store())
 
     result = client.daily_prices("600519", days=1)
 
@@ -110,7 +115,7 @@ def test_daily_prices_weekly_resamples_and_returns_english():
         "2026-01-12", "2026-01-13", "2026-01-14",   # 第 2 周
     ])
     fetcher = ClientFetcher("dummy", daily=daily)
-    client = OpenStockDataClient({"dummy": fetcher}, client_routes(), cache=None)
+    client = OpenStockDataClient({"dummy": fetcher}, client_routes(), cache=None, store=_mem_store())
 
     result = client.daily_prices("600519", days=10, period="weekly")
 
@@ -122,7 +127,7 @@ def test_daily_prices_weekly_resamples_and_returns_english():
 def test_daily_prices_monthly_resamples():
     daily = _daily_bars(["2026-01-05", "2026-01-20", "2026-02-10", "2026-02-25"])
     fetcher = ClientFetcher("dummy", daily=daily)
-    client = OpenStockDataClient({"dummy": fetcher}, client_routes(), cache=None)
+    client = OpenStockDataClient({"dummy": fetcher}, client_routes(), cache=None, store=_mem_store())
 
     result = client.daily_prices("600519", days=10, period="monthly")
 
@@ -131,7 +136,7 @@ def test_daily_prices_monthly_resamples():
 
 def test_daily_prices_rejects_unsupported_period():
     fetcher = ClientFetcher("dummy", daily=pd.DataFrame([{"日期": "2026-01-01", "收盘": 10.0}]))
-    client = OpenStockDataClient({"dummy": fetcher}, client_routes(), cache=None)
+    client = OpenStockDataClient({"dummy": fetcher}, client_routes(), cache=None, store=_mem_store())
 
     with pytest.raises(ValueError):
         client.daily_prices("600519", period="hourly")
@@ -521,3 +526,112 @@ def test_us_route_all_sources_failed_raises():
     client = OpenStockDataClient({"AlphaVantage": fetcher}, routes, cache=None)
     with pytest.raises(AllSourcesFailed):
         client.us_overview("AAPL")
+
+
+# ---------------------------------------------------------------------------
+# 日线本地长期存储：增量同步 / 除权防护 / 网络失败降级
+# ---------------------------------------------------------------------------
+
+
+class DailyNetFetcher(BaseFetcher):
+    """记录调用参数的日线网络源假件。"""
+
+    def __init__(self, frame=None, error=None):
+        super().__init__()
+        self.name = "dummy"
+        self._frame = frame
+        self._error = error
+        self.calls = 0
+        self.received = []
+
+    def _fetch_raw_data(self, stock_code, start_date, end_date):
+        return None
+
+    def _normalize_data(self, df, stock_code):
+        return df
+
+    def get_daily_data(self, stock_code, start_date=None, end_date=None, days=30):
+        self.calls += 1
+        self.received.append({"start_date": start_date, "days": days})
+        if self._error is not None:
+            raise self._error
+        return self._frame
+
+
+def _cn_bars(rows):
+    return pd.DataFrame([{"日期": d, "收盘": c} for d, c in rows])
+
+
+def _en_bars(rows):
+    return pd.DataFrame([{"date": d, "close": c} for d, c in rows])
+
+
+def _daily_client(fetcher, store):
+    return OpenStockDataClient({"dummy": fetcher}, client_routes(), cache=None, store=store)
+
+
+def test_daily_full_local_coverage_serves_without_network():
+    store = _mem_store()
+    store.upsert_daily("600519", _en_bars([("2099-01-05", 10.0), ("2099-01-06", 10.1), ("2099-01-07", 10.2)]))
+    fetcher = DailyNetFetcher(frame=_cn_bars([("2099-01-07", 10.2)]))
+    client = _daily_client(fetcher, store)
+
+    result = client.daily_prices("600519", days=3)
+
+    assert result.source == "LocalStoreFetcher"
+    assert result.from_cache is True
+    assert fetcher.calls == 0
+    assert result.data["close"].tolist() == [10.0, 10.1, 10.2]
+
+
+def test_daily_partial_coverage_fetches_only_gap_with_overlap():
+    store = _mem_store()
+    store.upsert_daily("600519", _en_bars([("2026-07-01", 10.0), ("2026-07-02", 10.1)]))
+    # 网络返回重叠行(07-02 收盘一致) + 新增行(07-03)
+    fetcher = DailyNetFetcher(frame=_cn_bars([("2026-07-02", 10.1), ("2026-07-03", 10.2)]))
+    client = _daily_client(fetcher, store)
+
+    result = client.daily_prices("600519", days=5)
+
+    assert fetcher.calls == 1
+    # 缺口收窄：start_date = 本地 max_date(07-02) 往前 10 天
+    assert fetcher.received[0]["start_date"] == "20260622"
+    assert result.data["date"].tolist() == ["2026-07-01", "2026-07-02", "2026-07-03"]
+    assert store.daily_coverage("600519")[2] == 3
+
+
+def test_daily_adjustment_conflict_refetches_symbol_fully():
+    store = _mem_store()
+    store.upsert_daily("600519", _en_bars([("2026-07-01", 10.0), ("2026-07-02", 10.1)]))
+    # 除权：重叠行 07-02 收盘大幅偏离旧值
+    fetcher = DailyNetFetcher(frame=_cn_bars([("2026-07-02", 8.88), ("2026-07-03", 8.98)]))
+    client = _daily_client(fetcher, store)
+
+    result = client.daily_prices("600519", days=5)
+
+    assert fetcher.calls == 2                       # 增量段 → 冲突 → 全量重拉
+    assert fetcher.received[1]["start_date"] is None  # 第二次为全量
+    assert result.data["close"].tolist() == [8.88, 8.98]  # 本地已替换为新口径
+    assert store.daily_coverage("600519")[2] == 2
+
+
+def test_daily_network_failure_falls_back_to_stale_local():
+    store = _mem_store()
+    store.upsert_daily("600519", _en_bars([("2026-07-01", 10.0), ("2026-07-02", 10.1)]))
+    fetcher = DailyNetFetcher(error=ConnectionError("down"))
+    client = _daily_client(fetcher, store)
+
+    result = client.daily_prices("600519", days=5)
+
+    assert result.source == "LocalStoreFetcher"
+    assert result.is_stale is True
+    assert result.data["close"].tolist() == [10.0, 10.1]
+
+
+def test_daily_network_failure_without_local_raises():
+    store = _mem_store()
+    fetcher = DailyNetFetcher(error=ConnectionError("down"))
+    client = _daily_client(fetcher, store)
+
+    with pytest.raises(AllSourcesFailed):
+        client.daily_prices("600519", days=5)

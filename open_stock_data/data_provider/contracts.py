@@ -113,6 +113,7 @@ class CachePolicy:
 
 
 ResultValidator = Callable[[Any], bool]
+PersistHook = Callable[[Any, "RouteRequest", str], None]
 
 
 @dataclass(frozen=True)
@@ -127,6 +128,9 @@ class RouteSpec:
     validator: Optional[ResultValidator] = None
     skip_shared_backend_after_network_error: bool = True
     batch_method: Optional[str] = None
+    persist: Optional[PersistHook] = None
+    """成功后回写钩子 persist(data, request, source_name)——用于本地长期存储；
+    钩子内部自行忽略来自本地 provider 的结果，异常不影响返回。"""
 
     @property
     def key(self) -> tuple[Operation, Optional[StockType]]:

@@ -46,6 +46,17 @@ def _snapshot_is_complete(df) -> bool:
     return bool(df.attrs.get("spot_complete", True))
 
 
+def _persist_fact(data, request, source) -> None:
+    """低频事实路由的本地长期存储回写：按 (operation, cache_key) 整帧存放。
+
+    来自本地 provider 的命中不回写；无 cache_key 的不存。异常由 RouteExecutor 吞掉。
+    """
+    if source == "LocalStoreFetcher" or request.cache_key is None:
+        return
+    from .local_store import get_local_store
+    get_local_store().save_fact(request.operation.value, request.cache_key, data, source)
+
+
 def create_default_routes() -> RouteRegistry:
     daily_a = (
         "EfinanceFetcher",
@@ -157,17 +168,19 @@ def create_default_routes() -> RouteRegistry:
         RouteSpec(
             Operation.BELONG_BOARD,
             None,
-            ("EfinanceFetcher", "TushareFetcher", "AkshareFetcher"),
+            ("LocalStoreFetcher", "EfinanceFetcher", "TushareFetcher", "AkshareFetcher"),
             "get_belong_board",
             "board",
             CachePolicy(CACHE_TTLS["belong_board"]),
+            persist=_persist_fact,
         ),
         RouteSpec(
             Operation.BOARD_CONS,
             None,
-            ("AkshareFetcher", "TushareFetcher"),
+            ("LocalStoreFetcher", "AkshareFetcher", "TushareFetcher"),
             "get_board_cons",
             "board",
+            persist=_persist_fact,
         ),
         RouteSpec(
             Operation.BILLBOARD,
@@ -180,31 +193,35 @@ def create_default_routes() -> RouteRegistry:
         RouteSpec(
             Operation.INDUSTRY_PE,
             None,
-            ("AkshareFetcher",),
+            ("LocalStoreFetcher", "AkshareFetcher"),
             "get_industry_pe",
             "industry_pe",
+            persist=_persist_fact,
         ),
         RouteSpec(
             Operation.DIVIDEND_HISTORY,
             None,
-            ("TushareFetcher", "AkshareFetcher"),
+            ("LocalStoreFetcher", "TushareFetcher", "AkshareFetcher"),
             "get_dividend_history",
             "dividend",
+            persist=_persist_fact,
         ),
         RouteSpec(
             Operation.FUND_HOLDER,
             None,
-            ("TushareFetcher", "AkshareFetcher"),
+            ("LocalStoreFetcher", "TushareFetcher", "AkshareFetcher"),
             "get_fund_holder",
             "fund_holder",
+            persist=_persist_fact,
         ),
         # ---- 股东 ----
         RouteSpec(
             Operation.TOP10_HOLDERS,
             None,
-            ("TushareFetcher", "AkshareFetcher"),
+            ("LocalStoreFetcher", "TushareFetcher", "AkshareFetcher"),
             "get_top10_holders",
             "top10_holders",
+            persist=_persist_fact,
         ),
         # ---- 融资融券（个股明细，比例作末轮兜底）----
         RouteSpec(
@@ -225,42 +242,47 @@ def create_default_routes() -> RouteRegistry:
         RouteSpec(
             Operation.US_OVERVIEW,
             StockType.US,
-            ("AlphaVantage", "YfinanceFetcher"),
+            ("LocalStoreFetcher", "AlphaVantage", "YfinanceFetcher"),
             "get_company_overview",
             "us_financials",
             CachePolicy(CACHE_TTLS["us_overview"]),
+            persist=_persist_fact,
         ),
         RouteSpec(
             Operation.US_BALANCE_SHEET,
             StockType.US,
-            ("AlphaVantage", "YfinanceFetcher"),
+            ("LocalStoreFetcher", "AlphaVantage", "YfinanceFetcher"),
             "get_balance_sheet",
             "us_financials",
             CachePolicy(CACHE_TTLS["us_report"]),
+            persist=_persist_fact,
         ),
         RouteSpec(
             Operation.US_INCOME_STATEMENT,
             StockType.US,
-            ("AlphaVantage", "YfinanceFetcher"),
+            ("LocalStoreFetcher", "AlphaVantage", "YfinanceFetcher"),
             "get_income_statement",
             "us_financials",
             CachePolicy(CACHE_TTLS["us_report"]),
+            persist=_persist_fact,
         ),
         RouteSpec(
             Operation.US_CASH_FLOW,
             StockType.US,
-            ("AlphaVantage", "YfinanceFetcher"),
+            ("LocalStoreFetcher", "AlphaVantage", "YfinanceFetcher"),
             "get_cash_flow",
             "us_financials",
             CachePolicy(CACHE_TTLS["us_report"]),
+            persist=_persist_fact,
         ),
         RouteSpec(
             Operation.US_EARNINGS,
             StockType.US,
-            ("AlphaVantage", "YfinanceFetcher"),
+            ("LocalStoreFetcher", "AlphaVantage", "YfinanceFetcher"),
             "get_earnings",
             "us_financials",
             CachePolicy(CACHE_TTLS["us_earnings"]),
+            persist=_persist_fact,
         ),
         RouteSpec(
             Operation.US_NEWS_SENTIMENT,
@@ -272,10 +294,11 @@ def create_default_routes() -> RouteRegistry:
         RouteSpec(
             Operation.US_INSIDER,
             StockType.US,
-            ("AlphaVantage", "YfinanceFetcher"),
+            ("LocalStoreFetcher", "AlphaVantage", "YfinanceFetcher"),
             "get_insider_transactions",
             "us_financials",
             CachePolicy(CACHE_TTLS["us_insider"]),
+            persist=_persist_fact,
         ),
         RouteSpec(
             Operation.US_TECH_INDICATOR,

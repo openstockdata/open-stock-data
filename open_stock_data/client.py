@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timedelta
+import logging
 import threading
 from typing import Mapping, Optional
 
@@ -16,9 +18,11 @@ from .data_provider.contracts import (
     FetchResult,
     Operation,
     RouteRequest,
+    utc_now,
 )
 from .exceptions import AllSourcesFailed
 from .data_provider.default_routes import create_default_routes
+from .data_provider.local_store import get_local_store, last_expected_trade_date
 from .data_provider.providers import create_default_providers
 from .data_provider.routing import RouteExecutor, RouteRegistry
 from .data_provider.stock_code import (
@@ -28,6 +32,11 @@ from .data_provider.stock_code import (
     validate_stock_type,
 )
 from .data_provider.types import UnifiedRealtimeQuote
+
+_LOGGER = logging.getLogger(__name__)
+
+# 全量拉取日线时的目标行数（建立本地历史基线；后续增量只补缺口）
+_DAILY_TARGET_ROWS = 500
 
 
 class OpenStockDataClient:
@@ -48,6 +57,7 @@ class OpenStockDataClient:
         providers: Optional[Mapping[str, BaseFetcher]] = None,
         routes: Optional[RouteRegistry] = None,
         cache: Optional[CacheStore] = None,
+        store=None,
     ):
         provider_map = dict(providers) if providers is not None else create_default_providers()
         self._executor = RouteExecutor(
@@ -55,6 +65,10 @@ class OpenStockDataClient:
             routes or create_default_routes(),
             cache=cache or CacheStore.get_store("routed_data"),
         )
+        self._store = store  # None → 懒加载全局 LocalStore（见 _daily_incremental）
+
+    def _daily_store(self):
+        return self._store if self._store is not None else get_local_store()
 
     def daily_prices(
         self,
@@ -75,19 +89,80 @@ class OpenStockDataClient:
             requested_days = days * 31 + 60
         normalized = normalize_stock_code(symbol, market)
         stock_type, _ = validate_stock_type(normalized, market)
-        request = RouteRequest(
-            Operation.DAILY_PRICES,
-            stock_type,
-            args=(normalized,),
-            kwargs={"start_date": start_date, "end_date": end_date, "days": requested_days},
-            cache_key=f"{normalized}:{start_date or ''}:{end_date or ''}:{requested_days}",
-        )
-        result = self._executor.execute(request)
-        data = to_english_columns(result.data.copy())
+
+        if start_date is None and end_date is None:
+            # days 模式：本地长期存储增量同步（查本地 max(date) → 只补缺口 → 除权防护）
+            result = self._daily_incremental(normalized, stock_type, requested_days)
+        else:
+            # 指定区间：直连路由，不走本地库
+            request = RouteRequest(
+                Operation.DAILY_PRICES,
+                stock_type,
+                args=(normalized,),
+                kwargs={"start_date": start_date, "end_date": end_date, "days": requested_days},
+                cache_key=f"{normalized}:{start_date or ''}:{end_date or ''}:{requested_days}",
+            )
+            result = self._executor.execute(request)
+            result = replace(result, data=to_english_columns(result.data.copy()))
+
+        data = result.data
         if period != "daily":
             data = self._resample_prices(data, period)
         data = data.tail(days).reset_index(drop=True)
         return replace(result, data=data)
+
+    def _daily_incremental(
+        self, symbol: str, stock_type: StockType, requested_days: int
+    ) -> FetchResult[pd.DataFrame]:
+        """日线增量同步：本地覆盖足够则免网络；否则只拉缺口段并 upsert（除权→单 symbol 全量重拉）。"""
+        store = self._daily_store()
+        target = max(requested_days, _DAILY_TARGET_ROWS)
+        coverage = store.daily_coverage(symbol)  # (min_date, max_date, rows) | None
+        last_expected = last_expected_trade_date()
+
+        # ① 完全命中：本地已到最新交易日且行数足够
+        if coverage and coverage[1] >= last_expected and coverage[2] >= requested_days:
+            local = store.load_daily(symbol, requested_days)
+            if local is not None:
+                return FetchResult(data=local, source="LocalStoreFetcher", fetched_at=utc_now(), from_cache=True)
+
+        # ② 计算缺口拉取窗口：有本地则从 max_date 往前 10 天制造重叠（用于除权校验），否则全量
+        if coverage:
+            start = (datetime.strptime(coverage[1], "%Y-%m-%d") - timedelta(days=10)).strftime("%Y%m%d")
+            fetch_days = requested_days
+        else:
+            start = None
+            fetch_days = target
+
+        try:
+            result = self._executor.execute(RouteRequest(
+                Operation.DAILY_PRICES, stock_type, args=(symbol,),
+                kwargs={"start_date": start, "end_date": None, "days": fetch_days}, cache_key=None,
+            ))
+        except AllSourcesFailed:
+            # ③ 网络全失败：本地有任何数据则降级返回（stale 好过无）
+            local = store.load_daily(symbol, requested_days)
+            if local is not None and not local.empty:
+                _LOGGER.warning("[daily] %s 网络全失败，降级使用本地历史 (%d 行)", symbol, len(local))
+                return FetchResult(data=local, source="LocalStoreFetcher", fetched_at=utc_now(),
+                                   from_cache=True, is_stale=True)
+            raise
+
+        fetched = to_english_columns(result.data.copy())
+        status = store.upsert_daily(symbol, fetched, source=result.source)
+        if status == "conflict":
+            # 检测到除权：该 symbol 已被清空，对其单独全量重拉后再写入
+            full = self._executor.execute(RouteRequest(
+                Operation.DAILY_PRICES, stock_type, args=(symbol,),
+                kwargs={"start_date": None, "end_date": None, "days": target}, cache_key=None,
+            ))
+            store.upsert_daily(symbol, to_english_columns(full.data.copy()), source=full.source)
+            result = full
+
+        merged = store.load_daily(symbol, requested_days)
+        if merged is None or merged.empty:
+            merged = fetched.tail(requested_days).reset_index(drop=True)  # store 写失败兜底
+        return FetchResult(data=merged, source=result.source, fetched_at=utc_now(), attempts=result.attempts)
 
     def realtime_quote(
         self,

@@ -7,6 +7,7 @@
 
 import pandas as pd
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 from typing import Optional, List
 
 
@@ -200,6 +201,16 @@ def calc_vma(volume: pd.Series, periods: List[int] = None) -> pd.DataFrame:
     return result
 
 
+def _true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
+    """Calculate true range once for ATR and ADX consumers."""
+    previous_close = close.shift(1)
+    ranges = pd.concat(
+        [high - low, (high - previous_close).abs(), (low - previous_close).abs()],
+        axis=1,
+    )
+    return ranges.max(axis=1)
+
+
 def calc_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
     """
     计算 ATR（真实波幅）
@@ -213,11 +224,34 @@ def calc_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14
     Returns:
         ATR 序列
     """
-    tr1 = high - low
-    tr2 = abs(high - close.shift(1))
-    tr3 = abs(low - close.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    return tr.rolling(window=period).mean()
+    return _true_range(high, low, close).rolling(window=period).mean()
+
+
+def _calc_adx_from_atr(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    atr: pd.Series,
+    period: int,
+) -> pd.DataFrame:
+    """Calculate ADX and directional indicators from a precomputed ATR."""
+    high_diff = high.diff()
+    low_diff = low.diff()
+    plus_dm = high_diff.where((high_diff > low_diff.abs()) & (high_diff > 0), 0)
+    minus_dm = low_diff.abs().where((low_diff.abs() > high_diff) & (low_diff < 0), 0)
+
+    plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
+    minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
+
+    di_sum = plus_di + minus_di
+    dx = 100 * (plus_di - minus_di).abs() / di_sum.replace(0, np.nan)
+    adx = dx.rolling(window=period).mean()
+
+    return pd.DataFrame({
+        "ADX": adx,
+        "+DI": plus_di,
+        "-DI": minus_di,
+    }, index=close.index)
 
 
 def calc_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.DataFrame:
@@ -233,33 +267,8 @@ def calc_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14
     Returns:
         包含 ADX, +DI, -DI 的 DataFrame
     """
-    # True Range
-    tr1 = high - low
-    tr2 = abs(high - close.shift(1))
-    tr3 = abs(low - close.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=period).mean()
-
-    # +DM 和 -DM
-    high_diff = high.diff()
-    low_diff = low.diff()
-    plus_dm = high_diff.where((high_diff > low_diff.abs()) & (high_diff > 0), 0)
-    minus_dm = low_diff.abs().where((low_diff.abs() > high_diff) & (low_diff < 0), 0)
-
-    # +DI 和 -DI
-    plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
-    minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
-
-    # DX 和 ADX
-    di_sum = plus_di + minus_di
-    dx = 100 * abs(plus_di - minus_di) / di_sum.replace(0, np.nan)
-    adx = dx.rolling(window=period).mean()
-
-    return pd.DataFrame({
-        "ADX": adx,
-        "+DI": plus_di,
-        "-DI": minus_di
-    }, index=close.index)
+    atr = _true_range(high, low, close).rolling(window=period).mean()
+    return _calc_adx_from_atr(high, low, close, atr, period)
 
 
 def calc_cci(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 20) -> pd.Series:
@@ -277,7 +286,11 @@ def calc_cci(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 20
     """
     tp = (high + low + close) / 3  # 典型价格
     tp_sma = tp.rolling(window=period).mean()
-    tp_mad = tp.rolling(window=period).apply(lambda x: abs(x - x.mean()).mean(), raw=True)
+    tp_mad = pd.Series(np.nan, index=tp.index, dtype=float)
+    if len(tp) >= period:
+        windows = sliding_window_view(tp.to_numpy(dtype=float), period)
+        window_means = windows.mean(axis=1, keepdims=True)
+        tp_mad.iloc[period - 1:] = np.abs(windows - window_means).mean(axis=1)
     return (tp - tp_sma) / (0.015 * tp_mad.replace(0, np.nan))
 
 
@@ -372,11 +385,14 @@ def add_technical_indicators(
         for col in vma_df.columns:
             df[col] = vma_df[col]
 
-    # ATR
-    df["ATR"] = calc_atr(high, low, close)
+    # ATR and ADX share true range and its rolling average.
+    period = 14
+    true_range = _true_range(high, low, close)
+    atr = true_range.rolling(window=period).mean()
+    df["ATR"] = atr
 
     # ADX 和 DMI
-    adx_df = calc_adx(high, low, close)
+    adx_df = _calc_adx_from_atr(high, low, close, atr, period)
     for col in adx_df.columns:
         df[col] = adx_df[col]
 
