@@ -1,27 +1,8 @@
 """
 多数据源数据提供层
 
-支持自动故障转移的多数据源股票数据获取：
-- TickflowFetcher (优先级 0): TickFlow 行情数据（日线支持免费服务，实时行情需要 API key）
-- TushareFetcher (优先级 0): Tushare Pro A 股数据（需要 token）
-- EfinanceFetcher (优先级 1): 东方财富 A 股数据
-- AkshareFetcher (优先级 2): Akshare 多市场数据
-- PytdxFetcher (优先级 2): 通达信行情服务器（A 股 K 线，免登录）
-- BaostockFetcher (优先级 3): Baostock A 股免费数据
-- AlphaVantageFetcher (优先级 4): Alpha Vantage 美股基本面和新闻（需要 API key）
-- YfinanceFetcher (优先级 5): Yahoo Finance 全局后备
-
-使用示例:
-    from open_stock_data import get_default_client
-
-    client = get_default_client()
-    prices = client.daily_prices("600519", days=30)
-    quote = client.realtime_quote("600519")
-    chip = client.chip_distribution("600519")
-
-DataFetcherManager 仍保留缓存工具（fetch_akshare / fetch_with_cache）、状态查询
-（get_status）与美股多源方法；日线/实时/资金流/板块等失败转移已由
-OpenStockDataClient + RouteExecutor 的静态路由承担。
+每个数据源是 ProviderPlugin 插件，注册到 ProviderContext 共享上下文。
+DynamicRouter 根据实时健康指标自适应调整 fallback 顺序。
 """
 
 from .types import (
@@ -57,17 +38,10 @@ from .circuit_breaker import (
     get_circuit_breaker,
     all_circuit_breaker_names,
 )
-
-from .base import (
-    BaseFetcher,
-    DataFetcherManager,
-    DataFetchError,
-    RateLimitError,
-    NetworkError,
-    classify_exception,
-    get_error_category,
-    NETWORK_EXCEPTIONS,
-)
+from .plugin import ProviderPlugin, ProviderMetadata, ProviderHealth, ProviderHealthEvent
+from .context import ProviderContext
+from .dynamic_router import DynamicRouter
+from .base import BaseFetcher, DataFetcherManager, DataFetchError, RateLimitError, NetworkError, classify_exception, get_error_category, NETWORK_EXCEPTIONS
 
 from .efinance_fetcher import EfinanceFetcher
 from .akshare_fetcher import AkshareFetcher
@@ -79,10 +53,16 @@ from .pytdx_fetcher import PytdxFetcher
 from .tickflow_fetcher import TickflowFetcher
 
 __all__ = [
-    # 管理器
+    # 插件体系
+    "ProviderPlugin",
+    "ProviderMetadata",
+    "ProviderHealth",
+    "ProviderHealthEvent",
+    "ProviderContext",
+    "DynamicRouter",
+    "BaseFetcher",
     "DataFetcherManager",
     # 数据获取器
-    "BaseFetcher",
     "TickflowFetcher",
     "EfinanceFetcher",
     "AkshareFetcher",
@@ -105,6 +85,7 @@ __all__ = [
     "AlphaVantageRateLimitError",
     "classify_exception",
     "get_error_category",
+    "NETWORK_EXCEPTIONS",
     # 熔断器
     "get_circuit_breaker",
     "all_circuit_breaker_names",
@@ -127,5 +108,4 @@ __all__ = [
     "STANDARD_COLUMNS",
     "COLUMN_MAPPING_TO_CN",
     "COLUMN_MAPPING_TO_EN",
-    "NETWORK_EXCEPTIONS",
 ]

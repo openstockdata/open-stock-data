@@ -1,24 +1,33 @@
-"""Construction of the default provider registry."""
+"""Construction of the default provider registry.
+
+Providers register themselves into ProviderContext on creation.
+"""
 
 from __future__ import annotations
 
 import logging
 
-from .base import BaseFetcher
-
+from .plugin import ProviderPlugin
+from .context import ProviderContext
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def create_default_providers() -> dict[str, BaseFetcher]:
-    from .akshare_fetcher import AkshareFetcher
-    from .alphavantage_fetcher import AlphaVantageFetcher
-    from .baostock_fetcher import BaostockFetcher
-    from .efinance_fetcher import EfinanceFetcher
-    from .pytdx_fetcher import PytdxFetcher
+def create_default_providers(context: Optional[ProviderContext] = None) -> dict[str, ProviderPlugin]:
+    """Initialize default providers and register them into ProviderContext.
+
+    Returns the dict of provider_name → ProviderPlugin.
+    """
+    ctx = context or ProviderContext.default()
+
     from .tickflow_fetcher import TickflowFetcher
+    from .efinance_fetcher import EfinanceFetcher
+    from .akshare_fetcher import AkshareFetcher
     from .tushare_fetcher import TushareFetcher
+    from .baostock_fetcher import BaostockFetcher
+    from .pytdx_fetcher import PytdxFetcher
     from .yfinance_fetcher import YfinanceFetcher
+    from .alphavantage_fetcher import AlphaVantageFetcher
 
     provider_types = (
         TickflowFetcher,
@@ -30,21 +39,25 @@ def create_default_providers() -> dict[str, BaseFetcher]:
         YfinanceFetcher,
         AlphaVantageFetcher,
     )
-    providers: dict[str, BaseFetcher] = {}
+    providers: dict[str, ProviderPlugin] = {}
     for provider_type in provider_types:
         try:
             provider = provider_type()
+            if provider.is_available:
+                ctx.register(provider)
+                providers[provider.metadata.name] = provider
         except Exception as exc:
             _LOGGER.warning("%s 初始化失败: %s", provider_type.__name__, exc)
-            continue
-        providers[provider.name] = provider
 
-    # 本地长期存储读取器：排在各事实路由 providers 首位，命中即免网络
+    # LocalStoreFetcher
     try:
         from .local_store import LocalStoreFetcher
         local = LocalStoreFetcher()
-        providers[local.name] = local
+        if local.is_available:
+            ctx.register(local)
+            providers[local.metadata.name] = local
     except Exception as exc:
         _LOGGER.warning("LocalStoreFetcher 初始化失败: %s", exc)
 
+    _LOGGER.info("已注册 %d 个数据源: %s", len(providers), list(providers.keys()))
     return providers

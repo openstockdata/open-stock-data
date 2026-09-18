@@ -32,6 +32,14 @@ class Operation(str, Enum):
     FUND_HOLDER = "fund_holder"
     # 股东
     TOP10_HOLDERS = "top10_holders"
+    # 业绩 / 分红 / 新闻（Akshare 独有）
+    BID_ASK = "bid_ask"
+    EARNINGS_FORECAST = "earnings_forecast"
+    EARNINGS_REPORT = "earnings_report"
+    EARNINGS_EXPRESS = "earnings_express"
+    DIVIDEND_PLAN = "dividend_plan"
+    DIVIDEND_CNINFO = "dividend_cninfo"
+    CCTV_NEWS = "cctv_news"
     # 美股基本面（AlphaVantage > YFinance；news/tech 仅 AlphaVantage）
     US_OVERVIEW = "us_overview"
     US_BALANCE_SHEET = "us_balance_sheet"

@@ -5,10 +5,21 @@ import pathlib
 import sys
 import threading
 from typing import Any, Optional
+from dataclasses import dataclass
+from datetime import datetime
 
 import diskcache
 
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class _CacheEntry:
+    """缓存条目：存储数据、来源、时间戳。"""
+    data: Any
+    source: str
+    fetched_at: datetime
+    stored_at: float
 
 
 def _env_ttl(key: str, default: float) -> float:

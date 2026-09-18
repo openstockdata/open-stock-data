@@ -67,8 +67,8 @@ class TestDataProvider:
         manager = get_data_manager()
         status = manager.get_status()
         assert isinstance(status, dict)
-        assert "fetchers" in status
-        assert len(status["fetchers"]) > 0
+        assert "providers" in status
+        assert len(status["providers"]) > 0
 
     def test_circuit_breaker_types(self):
         from open_stock_data.data_provider import get_circuit_breaker

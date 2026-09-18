@@ -281,8 +281,13 @@ class LocalStoreFetcher:
     """
 
     name = "LocalStoreFetcher"
-    priority = -1
+    priority = 100
     backend_group = ""
+
+    @property
+    def metadata(self):
+        from .plugin import ProviderMetadata
+        return ProviderMetadata(name="LocalStoreFetcher", priority=100, tags=("local",))
 
     def __init__(self, store: Optional[LocalStore] = None):
         self._store = store or get_local_store()
@@ -293,6 +298,10 @@ class LocalStoreFetcher:
 
     def get_backend_failure_scope(self, method_name: str, *args, **kwargs) -> Optional[str]:
         return None
+
+    def execute(self, method_name: str, *args, **kwargs) -> Any:
+        method = getattr(self, method_name)
+        return method(*args, **kwargs)
 
     def _read(self, kind: str, key: str):
         try:

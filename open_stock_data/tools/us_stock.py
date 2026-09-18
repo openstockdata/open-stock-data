@@ -39,7 +39,7 @@ def _download_alphavantage_prices(symbol: str, start_date: str) -> pd.DataFrame 
     from ..data_provider import AlphaVantageFetcher
 
     av = AlphaVantageFetcher()
-    df = av._fetch_raw_data(symbol, start_date, datetime.now().strftime("%Y%m%d"))
+    df = av._fetch_daily_data(symbol, start_date, datetime.now().strftime("%Y%m%d"))
     if df is None or df.empty:
         return None
     df = av._normalize_data(df, symbol)

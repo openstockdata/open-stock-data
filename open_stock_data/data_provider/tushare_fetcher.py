@@ -1,7 +1,6 @@
 """
 Tushare 数据获取器
 使用 tushare 库获取 A 股数据，需要配置 TUSHARE_TOKEN 环境变量。
-配置后优先级最高（优先级 0）。
 """
 
 import os
@@ -25,7 +24,7 @@ class TushareFetcher(BaseFetcher):
     """Tushare 数据获取器"""
 
     name = "TushareFetcher"
-    priority = 0  # A 股首选（需配置 token）
+    priority = 9  # A 股（需配置 token）
     backend_group = "tushare"
 
     # 限流配置：免费版 50次/分钟
@@ -162,7 +161,7 @@ class TushareFetcher(BaseFetcher):
         retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
         reraise=True
     )
-    def _fetch_raw_data(
+    def _fetch_daily_data(
         self,
         stock_code: str,
         start_date: str,

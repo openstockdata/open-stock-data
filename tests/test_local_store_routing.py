@@ -3,12 +3,14 @@ import pandas as pd
 import pytest
 
 from open_stock_data.data_provider.circuit_breaker import get_circuit_breaker
+from open_stock_data.data_provider.context import ProviderContext
 from open_stock_data.data_provider.contracts import (
     AttemptOutcome,
     Operation,
     RouteRequest,
     RouteSpec,
 )
+from open_stock_data.data_provider.dynamic_router import DynamicRouter
 from open_stock_data.data_provider.local_store import LocalStore, LocalStoreFetcher
 from open_stock_data.data_provider.routing import RouteExecutor, RouteRegistry
 
@@ -33,8 +35,17 @@ class NetFetcher:
     def is_available(self):
         return True
 
+    @property
+    def metadata(self):
+        from open_stock_data.data_provider.plugin import ProviderMetadata
+        return ProviderMetadata(name="TushareFetcher", priority=0, tags=())
+
     def get_backend_failure_scope(self, method_name, *a, **k):
         return None
+
+    def execute(self, method_name: str, *args, **kwargs):
+        method = getattr(self, method_name)
+        return method(*args, **kwargs)
 
     def get_dividend_history(self, symbol):
         self.calls += 1
@@ -56,8 +67,12 @@ def _executor(store):
         persist=persist,
     )
     net = NetFetcher(pd.DataFrame([{"公告日期": "2026-01-01", "派息": 3.0}]))
-    providers = {"LocalStoreFetcher": LocalStoreFetcher(store), "TushareFetcher": net}
-    return RouteExecutor(providers, RouteRegistry([route]), cache=None), net
+    ctx = ProviderContext()
+    ctx.register(LocalStoreFetcher(store))
+    ctx.register(net)
+    router = DynamicRouter(ctx)
+    registry = RouteRegistry([route])
+    return RouteExecutor(router, registry), net
 
 
 def _req():

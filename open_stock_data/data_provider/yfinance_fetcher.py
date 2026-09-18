@@ -21,7 +21,7 @@ class YfinanceFetcher(BaseFetcher):
     """YFinance 数据获取器"""
 
     name = "YfinanceFetcher"
-    priority = 5  # 全局后备
+    priority = 9  # 港股/美股第一位
     backend_group = "yahoo"
 
     def __init__(self):
@@ -76,7 +76,7 @@ class YfinanceFetcher(BaseFetcher):
         retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
         reraise=True
     )
-    def _fetch_raw_data(
+    def _fetch_daily_data(
         self,
         stock_code: str,
         start_date: str,
@@ -123,6 +123,13 @@ class YfinanceFetcher(BaseFetcher):
         """标准化数据"""
         if df is None or df.empty:
             return pd.DataFrame()
+
+        # yfinance ``download()`` may return a MultiIndex DataFrame whose columns
+        # look like ``('Date', ''), ('Close', '600519.SS'), ...``. Flatten to the
+        # first level so the downstream rename/column checks see plain string names.
+        if isinstance(df.columns, pd.MultiIndex):
+            df = df.copy()
+            df.columns = df.columns.get_level_values(0)
 
         # YFinance 列名映射（大写）
         column_mapping = {

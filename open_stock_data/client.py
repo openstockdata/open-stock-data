@@ -1,4 +1,8 @@
-"""Typed public API for stock market data."""
+"""Typed public API for stock market data.
+
+OpenStockDataClient uses ProviderContext + DynamicRouter for adaptive
+provider selection and fallback.
+"""
 
 from __future__ import annotations
 
@@ -10,9 +14,10 @@ from typing import Mapping, Optional
 
 import pandas as pd
 
-from .cache import CacheStore
+from .exceptions import AllSourcesFailed, BatchIncomplete
 from .data_provider.base import BaseFetcher
 from .data_provider.columns import to_english_columns
+from .data_provider.context import ProviderContext
 from .data_provider.contracts import (
     BatchFetchResult,
     FetchResult,
@@ -20,7 +25,7 @@ from .data_provider.contracts import (
     RouteRequest,
     utc_now,
 )
-from .exceptions import AllSourcesFailed
+from .data_provider.dynamic_router import DynamicRouter
 from .data_provider.default_routes import create_default_routes
 from .data_provider.local_store import get_local_store, last_expected_trade_date
 from .data_provider.providers import create_default_providers
@@ -35,37 +40,42 @@ from .data_provider.types import UnifiedRealtimeQuote
 
 _LOGGER = logging.getLogger(__name__)
 
-# 全量拉取日线时的目标行数（建立本地历史基线；后续增量只补缺口）
 _DAILY_TARGET_ROWS = 500
 
 
 class OpenStockDataClient:
-    """Synchronous typed data API backed by fixed provider routes.
+    """Synchronous typed data API backed by dynamic provider routing.
 
-    列名契约（两级，刻意区分）：
-    - **价格/快照**（daily_prices、a_stock_snapshot）：返回标准英文列
-      （date/open/close/high/low/volume），由 `to_english_columns` 归一，
-      供跨市场统一消费与技术指标计算。
-    - **分析类**（fund_flow、belong_board、industry_pe、dividend_history、
-      top10_holders、margin_detail 等）：返回数据源原生列（多为中文，如
-      主力净流入/板块名称），因这些字段无标准英文 schema，强转只会造成
-      "半中半英"。工具层按需格式化后输出。
+    Uses ProviderContext for provider registry and DynamicRouter for
+    adaptive fallback ordering based on real-time health metrics.
     """
 
     def __init__(
         self,
-        providers: Optional[Mapping[str, BaseFetcher]] = None,
-        routes: Optional[RouteRegistry] = None,
-        cache: Optional[CacheStore] = None,
+        providers: Optional[dict] = None,
+        routes=None,
+        *,
+        cache=None,
         store=None,
     ):
-        provider_map = dict(providers) if providers is not None else create_default_providers()
-        self._executor = RouteExecutor(
-            provider_map,
-            routes or create_default_routes(),
-            cache=cache or CacheStore.get_store("routed_data"),
-        )
-        self._store = store  # None → 懒加载全局 LocalStore（见 _daily_incremental）
+        self._store = store
+        if providers is not None:
+            self._context = ProviderContext()
+            for fetcher in providers.values():
+                self._context.register(fetcher)
+        else:
+            self._context = ProviderContext.default()
+        if not self._context.provider_names:
+            create_default_providers(self._context)
+        self._router = DynamicRouter(self._context)
+        if cache is not None:
+            self._router.cache = cache
+        registry = routes if routes is not None else create_default_routes()
+        self._executor = RouteExecutor(self._router, registry)
+
+    @property
+    def provider_context(self) -> ProviderContext:
+        return self._context
 
     def _daily_store(self):
         return self._store if self._store is not None else get_local_store()
@@ -91,10 +101,8 @@ class OpenStockDataClient:
         stock_type, _ = validate_stock_type(normalized, market)
 
         if start_date is None and end_date is None:
-            # days 模式：本地长期存储增量同步（查本地 max(date) → 只补缺口 → 除权防护）
             result = self._daily_incremental(normalized, stock_type, requested_days)
         else:
-            # 指定区间：直连路由，不走本地库
             request = RouteRequest(
                 Operation.DAILY_PRICES,
                 stock_type,
@@ -114,19 +122,16 @@ class OpenStockDataClient:
     def _daily_incremental(
         self, symbol: str, stock_type: StockType, requested_days: int
     ) -> FetchResult[pd.DataFrame]:
-        """日线增量同步：本地覆盖足够则免网络；否则只拉缺口段并 upsert（除权→单 symbol 全量重拉）。"""
         store = self._daily_store()
         target = max(requested_days, _DAILY_TARGET_ROWS)
-        coverage = store.daily_coverage(symbol)  # (min_date, max_date, rows) | None
+        coverage = store.daily_coverage(symbol)
         last_expected = last_expected_trade_date()
 
-        # ① 完全命中：本地已到最新交易日且行数足够
         if coverage and coverage[1] >= last_expected and coverage[2] >= requested_days:
             local = store.load_daily(symbol, requested_days)
             if local is not None:
                 return FetchResult(data=local, source="LocalStoreFetcher", fetched_at=utc_now(), from_cache=True)
 
-        # ② 计算缺口拉取窗口：有本地则从 max_date 往前 10 天制造重叠（用于除权校验），否则全量
         if coverage:
             start = (datetime.strptime(coverage[1], "%Y-%m-%d") - timedelta(days=10)).strftime("%Y%m%d")
             fetch_days = requested_days
@@ -140,7 +145,6 @@ class OpenStockDataClient:
                 kwargs={"start_date": start, "end_date": None, "days": fetch_days}, cache_key=None,
             ))
         except AllSourcesFailed:
-            # ③ 网络全失败：本地有任何数据则降级返回（stale 好过无）
             local = store.load_daily(symbol, requested_days)
             if local is not None and not local.empty:
                 _LOGGER.warning("[daily] %s 网络全失败，降级使用本地历史 (%d 行)", symbol, len(local))
@@ -151,7 +155,6 @@ class OpenStockDataClient:
         fetched = to_english_columns(result.data.copy())
         status = store.upsert_daily(symbol, fetched, source=result.source)
         if status == "conflict":
-            # 检测到除权：该 symbol 已被清空，对其单独全量重拉后再写入
             full = self._executor.execute(RouteRequest(
                 Operation.DAILY_PRICES, stock_type, args=(symbol,),
                 kwargs={"start_date": None, "end_date": None, "days": target}, cache_key=None,
@@ -161,7 +164,7 @@ class OpenStockDataClient:
 
         merged = store.load_daily(symbol, requested_days)
         if merged is None or merged.empty:
-            merged = fetched.tail(requested_days).reset_index(drop=True)  # store 写失败兜底
+            merged = fetched.tail(requested_days).reset_index(drop=True)
         return FetchResult(data=merged, source=result.source, fetched_at=utc_now(), attempts=result.attempts)
 
     def realtime_quote(
@@ -279,7 +282,6 @@ class OpenStockDataClient:
         )
 
     def margin_detail(self, symbol: str, market: str = "sh") -> FetchResult[pd.DataFrame]:
-        """融资融券：先查指定市场明细，再查另一市场，最后以融资融券比例兜底。"""
         other_market = "sz" if market == "sh" else "sh"
         for exchange in (market, other_market):
             try:
@@ -299,7 +301,7 @@ class OpenStockDataClient:
         result.data.attrs["is_ratio_data"] = True
         return result
 
-    # ==================== 美股基本面（AlphaVantage > YFinance）====================
+    # ==================== 美股基本面 ====================
 
     def us_overview(self, symbol: str) -> FetchResult[dict]:
         return self._executor.execute(

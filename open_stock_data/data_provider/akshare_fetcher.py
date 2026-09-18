@@ -1,5 +1,5 @@
 """
-Akshare 数据获取器 (优先级 2)
+Akshare 数据获取器
 使用 akshare 库获取股票数据，支持多数据源（东财、新浪、腾讯）及多市场
 """
 
@@ -56,7 +56,7 @@ class AkshareFetcher(BaseFetcher):
     """Akshare 数据获取器"""
 
     name = "AkshareFetcher"
-    priority = 2  # 多市场支持
+    priority = 4  # 请求优先级
     backend_group = "eastmoney"
     _BACKEND_FAILURE_SCOPE_MAP = {
         "get_realtime_quote": "eastmoney:push2:realtime_quotes",
@@ -196,7 +196,7 @@ class AkshareFetcher(BaseFetcher):
         retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
         reraise=True
     )
-    def _fetch_raw_data(
+    def _fetch_daily_data(
         self,
         stock_code: str,
         start_date: str,

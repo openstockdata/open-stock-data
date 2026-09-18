@@ -28,11 +28,12 @@ def test_spot_route_disables_shared_backend_skip():
     assert route.skip_shared_backend_after_network_error is False
 
 
-def test_daily_route_priority_efinance_before_tickflow():
-    """A股日线：Efinance 在 Tickflow 之前，避免过快触发 Tickflow 限流。"""
+def test_daily_route_priority_tickflow_first():
+    """A股日线：Tickflow 优先级最高（priority=10），其次 Efinance(5)，再次 Akshare(1)。"""
     providers = _providers(Operation.DAILY_PRICES, StockType.A_STOCK)
-    assert "EfinanceFetcher" in providers and "AkshareFetcher" in providers
-    assert providers.index("EfinanceFetcher") < providers.index("TickflowFetcher")
+    assert "TickflowFetcher" in providers and "EfinanceFetcher" in providers and "AkshareFetcher" in providers
+    assert providers.index("TickflowFetcher") < providers.index("EfinanceFetcher")
+    assert providers.index("EfinanceFetcher") < providers.index("AkshareFetcher")
 
 
 @pytest.mark.network

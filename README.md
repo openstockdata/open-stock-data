@@ -83,7 +83,32 @@ export ALPHA_VANTAGE_API_KEY="your-api-key"
 
 ## 数据源与故障转移
 
-项目内置 8 个数据源，并根据市场和函数类型自动选择可用来源：
+### 架构：动态插件体系
+
+项目采用**动态插件架构**（借鉴 deepseek-harness 设计理念），核心组件：
+
+- **`ProviderPlugin`** — 每个数据源实现的插件协议（`metadata`、`is_available`、`execute`、`report_health`）
+- **`ProviderContext`** — 共享上下文，管理所有 provider 的注册、健康指标和事件分发
+- **`DynamicRouter`** — 自适应路由器，运行时根据健康分（成功率、延迟、熔断状态）动态计算最优 fallback 顺序
+- **`OpenStockDataClient`** — 直接依赖 `ProviderContext`，无静态 provider 列表、无硬编码 fallback 链
+
+```
+OpenStockDataClient
+    ├── ProviderContext（唯一事实来源）
+    │     ├── ProviderRegistry（运行时可插拔）
+    │     ├── HealthMetrics（健康分 = 成功率×100 - 延迟×0.1 - 失败数×5）
+    │     └── EventBus（健康事件通知）
+    └── DynamicRouter（按健康分排序，动态 fallback）
+          └── RouteRegistry（静态路由定义：operation/method/validator/cache_policy）
+```
+
+健康分高的 provider 优先被调用；熔断中的 provider 自动降为最低优先级；本地存储 `LocalStoreFetcher` 优先级最高（`priority=100`），命中即免网络。
+
+**动态调整优先级：** 运行时可通过 `client.provider_context.set_priority("TickflowFetcher", 20)` 动态修改任意 provider 的优先级，立即生效，无需重启。详见 [PROVIDER_ROUTING.md](docs/PROVIDER_ROUTING.md)。
+
+### 内置数据源
+
+项目内置 8+ 个数据源，根据市场和函数类型自动选择可用来源：
 
 - **TickFlow**: 全球市场，免费日线K线，配置 API key 后支持实时行情
 - **A 股**: Efinance、Akshare、Tushare、Pytdx、Baostock
@@ -92,30 +117,9 @@ export ALPHA_VANTAGE_API_KEY="your-api-key"
 - **加密货币**: OKX、Binance
 - **新闻**: 东方财富、新浪、NewsNow
 
-### 故障转移优先级
-
-部分工具会按优先级自动故障转移（**已优化 2026-07-07**）：
-
-- **K线数据**: `Efinance → Akshare → Tushare → TickFlow → Pytdx → Baostock`
-- **全市场快照**: `Efinance → Akshare`
-- **A股实时**: `TickFlow → Efinance → Tushare → Akshare`
-- **港股实时**: `TickFlow → Akshare → YFinance`
-- **美股实时**: `TickFlow → YFinance → AlphaVantage`
-
-**优先级调整说明**:
-- **TickFlow 降低优先级**: 限流严格（10次/分钟），批量场景易触发熔断，现调整到 Tushare 之后
-- **Efinance 提升优先级**: 稳定性好，无明确限流，适合批量数据获取和全市场扫描
-- **预期收益**: 优先使用更稳定的 Efinance 可减少批量场景下的限流熔断；实际收益随网络与时段而定，暂无可复现基准数据
-
-**注意**:
-- TickFlow 未配置 API key 时仅用于免费日线，实时行情自动回退到其他源
-- TickFlow 适合少量股票查询、实时行情、美股/港股数据，不适合批量获取
-- Tushare 需配置 token，配额限制 50次/分钟
-- AlphaVantage 需配置 API key，配额限制 5次/分钟、500次/天
-
-完整的数据源能力对照和故障转移配置详见 [docs/FETCHER_CAPABILITIES.md](docs/FETCHER_CAPABILITIES.md)。
-
 数据源状态可通过 `data_source_status()` 查看。
+
+完整的数据源能力对照和 Provider 路由配置详见 [docs/PROVIDER_ROUTING.md](docs/PROVIDER_ROUTING.md)。
 
 ## 东方财富限流补丁
 

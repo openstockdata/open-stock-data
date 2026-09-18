@@ -1,21 +1,22 @@
-"""
-数据获取基类和管理器
-"""
+"""数据获取基类。"""
+
+from __future__ import annotations
 
 import logging
-import os
 import random
 import time
-import threading
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any, TYPE_CHECKING, Callable
+from typing import Optional, Any, TYPE_CHECKING
 
 import pandas as pd
 import numpy as np
 import requests.exceptions
 
-from ..cache import CACHE_TTLS, CacheStore
+from ..cache import CACHE_TTLS
+from .plugin import ProviderPlugin, ProviderMetadata, ProviderHealthEvent
+from .context import ProviderContext
+from .providers import create_default_providers
 
 # 网络类异常：后端服务器不可达，应向上传播以触发同源跳过
 NETWORK_EXCEPTIONS = (
@@ -60,8 +61,8 @@ def _is_network_error(e: Exception) -> bool:
     return isinstance(e, (*NETWORK_EXCEPTIONS, NetworkError))
 
 
-class BaseFetcher(ABC):
-    """数据获取器基类"""
+class BaseFetcher(ProviderPlugin):
+    """数据获取器基类，同时实现 ProviderPlugin 协议。"""
 
     name: str = "BaseFetcher"
     priority: int = 99
@@ -78,11 +79,25 @@ class BaseFetcher(ABC):
 
     def __init__(self):
         self._available = True
+        self._health_event_listeners: list = []
+
+    @property
+    def metadata(self) -> ProviderMetadata:
+        return ProviderMetadata(name=self.name, priority=self.priority, tags=tuple())
 
     @property
     def is_available(self) -> bool:
         """数据源是否可用"""
         return self._available
+
+    def execute(self, method_name: str, *args, **kwargs) -> Any:
+        """ProviderPlugin 入口：反射调用对应的方法名。"""
+        method = getattr(self, method_name)
+        return method(*args, **kwargs)
+
+    def report_health(self, event: ProviderHealthEvent) -> None:
+        """ProviderPlugin 协议：接收健康事件。"""
+        pass
 
     def random_sleep(self, min_seconds: float = 1.0, max_seconds: float = 3.0):
         """随机延迟，用于反爬"""
@@ -107,7 +122,7 @@ class BaseFetcher(ABC):
         return int(trading_days * cls._TRADING_DAY_TO_CALENDAR_RATIO) + cls._TRADING_DAY_BUFFER
 
     @abstractmethod
-    def _fetch_raw_data(
+    def _fetch_daily_data(
         self,
         stock_code: str,
         start_date: str,
@@ -152,13 +167,12 @@ class BaseFetcher(ABC):
             start_date = (datetime.now() - timedelta(days=self._estimate_calendar_days(days))).strftime("%Y%m%d")
 
         try:
-            df = self._fetch_raw_data(stock_code, start_date, end_date)
+            df = self._fetch_daily_data(stock_code, start_date, end_date)
             if df is None or df.empty:
                 return None
 
             df = self._normalize_data(df, stock_code)
             df = self._clean_data(df)
-            df = self._calculate_indicators(df)
 
             return df
 
@@ -335,306 +349,52 @@ class BaseFetcher(ABC):
 
 
 class DataFetcherManager:
-    """数据获取管理器，保留缓存工具（fetch_akshare/fetch_with_cache）与状态查询。"""
+    """向后兼容包装：委托给 ProviderContext。
+
+    已废弃，仅用于 tools/utils 中的遗留引用。
+    """
 
     def __init__(self, auto_init: bool = True):
-        self._fetchers: List[BaseFetcher] = []
-        self._daily_cache_target_days: int = max(int(os.getenv("DAILY_CACHE_TARGET_DAYS", "425")), 30)
-        self._batch_realtime_min_size: int = max(
-            int(os.getenv("BATCH_REALTIME_MIN_SIZE", "8")),
-            1,
-        )
-        self._store = CacheStore.get_store("data_provider")
+        self._ctx = ProviderContext.default()
+        if auto_init and not self._ctx.provider_names:
+            create_default_providers(self._ctx)
 
-        if auto_init:
-            self._init_default_fetchers()
+    def get_fetchers(self) -> list:
+        return list(self._ctx.get_available_providers())
 
-    def _get_backend_failure_scope(
-        self,
-        fetcher: BaseFetcher,
-        method_name: str,
-        *args,
-        **kwargs,
-    ) -> Optional[str]:
-        """解析 fetcher 在当前方法上的后端失败作用域（美股多源方法仍复用）。"""
-        if not fetcher.backend_group:
-            return None
-        scope = fetcher.get_backend_failure_scope(method_name, *args, **kwargs)
-        return scope or fetcher.backend_group
-
-    def _is_backend_scope_failed(
-        self,
-        failed_backend_scopes: set,
-        fetcher: BaseFetcher,
-        method_name: str,
-        *args,
-        **kwargs,
-    ) -> tuple[bool, Optional[str]]:
-        scope = self._get_backend_failure_scope(fetcher, method_name, *args, **kwargs)
-        return bool(scope and scope in failed_backend_scopes), scope
-
-    def _mark_backend_scope_failed(
-        self,
-        failed_backend_scopes: set,
-        fetcher: BaseFetcher,
-        method_name: str,
-        *args,
-        **kwargs,
-    ) -> Optional[str]:
-        scope = self._get_backend_failure_scope(fetcher, method_name, *args, **kwargs)
-        if scope:
-            failed_backend_scopes.add(scope)
-        return scope
-
-    def _init_default_fetchers(self):
-        """初始化默认数据源"""
-        try:
-            from .tickflow_fetcher import TickflowFetcher
-            fetcher = TickflowFetcher()
-            if fetcher.is_available:
-                self.add_fetcher(fetcher)
-        except Exception as e:
-            _LOGGER.warning(f"TickflowFetcher 初始化失败: {e}")
-
-        try:
-            from .efinance_fetcher import EfinanceFetcher
-            self.add_fetcher(EfinanceFetcher())
-        except Exception as e:
-            _LOGGER.warning(f"EfinanceFetcher 初始化失败: {e}")
-
-        try:
-            from .akshare_fetcher import AkshareFetcher
-            self.add_fetcher(AkshareFetcher())
-        except Exception as e:
-            _LOGGER.warning(f"AkshareFetcher 初始化失败: {e}")
-
-        try:
-            from .tushare_fetcher import TushareFetcher
-            fetcher = TushareFetcher()
-            if fetcher.is_available:
-                self.add_fetcher(fetcher)
-        except Exception as e:
-            _LOGGER.warning(f"TushareFetcher 初始化失败: {e}")
-
-        try:
-            from .baostock_fetcher import BaostockFetcher
-            self.add_fetcher(BaostockFetcher())
-        except Exception as e:
-            _LOGGER.warning(f"BaostockFetcher 初始化失败: {e}")
-
-        try:
-            from .pytdx_fetcher import PytdxFetcher
-            fetcher = PytdxFetcher()
-            if fetcher.is_available:
-                self.add_fetcher(fetcher)
-        except Exception as e:
-            _LOGGER.debug(f"PytdxFetcher 初始化失败: {e}")
-
-        try:
-            from .yfinance_fetcher import YfinanceFetcher
-            self.add_fetcher(YfinanceFetcher())
-        except Exception as e:
-            _LOGGER.warning(f"YfinanceFetcher 初始化失败: {e}")
-
-        try:
-            from .alphavantage_fetcher import AlphaVantageFetcher
-            fetcher = AlphaVantageFetcher()
-            if fetcher.is_available:
-                self.add_fetcher(fetcher)
-        except Exception as e:
-            _LOGGER.warning(f"AlphaVantageFetcher 初始化失败: {e}")
-
-        _LOGGER.info(f"已初始化 {len(self._fetchers)} 个数据源: {[f.name for f in self._fetchers]}")
-
-    def add_fetcher(self, fetcher: BaseFetcher):
-        """添加数据源并按优先级排序"""
-        self._fetchers.append(fetcher)
-        self._fetchers.sort(key=lambda f: f.priority)
-
-    def get_fetchers(self) -> List[BaseFetcher]:
-        """获取所有数据源"""
-        return self._fetchers.copy()
-
-    def fetch_with_cache(
-        self,
-        loader,
-        *args,
-        ttl: float = 86400,
-        key: Optional[str] = None,
-        namespace: str = "general",
-        cache_none: bool = False,
-        **kwargs,
-    ) -> Any:
-        loader_name = getattr(loader, "__name__", str(loader))
-        cache_key_suffix = key or f"{loader_name}-{args}-{kwargs}"
-        cache_key = f"cache:{namespace}:{cache_key_suffix}"
-
-        cached = self._store.get(cache_key)
-        if cached is not None:
-            _LOGGER.debug("[cache] hit: key=%s", cache_key)
-            return cached
-
-        _LOGGER.debug("[cache] miss: key=%s", cache_key)
-        result = loader(*args, **kwargs)
-        if result is not None or cache_none:
-            self._store.set(cache_key, result, expire=float(ttl))
-        return result
-
-    def fetch_akshare(
-        self,
-        fun,
-        *args,
-        ttl: float = 86400,
-        key: Optional[str] = None,
-        **kwargs,
-    ) -> Any:
-        cache_kwargs = dict(kwargs)
-        call_kwargs = dict(kwargs)
-        call_kwargs.pop("ttl2", None)
-        cache_kwargs.pop("ttl2", None)
-
-        cache_key = key or f"{fun.__name__}-{args}-{cache_kwargs}"
-
-        def _load():
-            for attempt in range(2):
-                try:
-                    _LOGGER.debug("[cache] akshare request: key=%s", cache_key)
-                    return fun(*args, **call_kwargs)
-                except NETWORK_EXCEPTIONS as exc:
-                    if attempt == 0:
-                        _LOGGER.warning(
-                            "[cache] akshare network error, retry: key=%s error=%s: %s",
-                            cache_key, type(exc).__name__, exc,
-                        )
-                        time.sleep(2 + random.uniform(0, 1))
-                    else:
-                        _LOGGER.warning(
-                            "[cache] akshare network error after retry: key=%s error=%s: %s",
-                            cache_key, type(exc).__name__, exc,
-                        )
-                except Exception as exc:
-                    _LOGGER.warning(
-                        "[cache] akshare call failed: key=%s error=%s: %s",
-                        cache_key, type(exc).__name__, exc,
-                    )
-                    break
-            return None
-
-        return self.fetch_with_cache(_load, ttl=ttl, key=cache_key, namespace="akshare")
-
-    def get_status(self) -> Dict[str, Any]:
-        """获取数据源状态"""
+    def get_status(self) -> dict:
         return {
-            'fetchers': [
-                {
-                    'name': f.name,
-                    'priority': f.priority,
-                    'available': f.is_available,
-                }
-                for f in self._fetchers
-            ],
-            'daily_circuit_breaker': get_circuit_breaker("daily").get_status(),
-            'realtime_circuit_breaker': get_circuit_breaker("realtime").get_status(),
-            'chip_circuit_breaker': get_circuit_breaker("chip").get_status(),
-            'fund_flow_circuit_breaker': get_circuit_breaker("fund_flow").get_status(),
-            'board_circuit_breaker': get_circuit_breaker("board").get_status(),
-            'billboard_circuit_breaker': get_circuit_breaker("billboard").get_status(),
-            'us_financials_circuit_breaker': get_circuit_breaker("us_financials").get_status(),
-            'margin_circuit_breaker': get_circuit_breaker("margin").get_status(),
-            'industry_pe_circuit_breaker': get_circuit_breaker("industry_pe").get_status(),
-            'spot_circuit_breaker': get_circuit_breaker("spot").get_status(),
-            'dividend_circuit_breaker': get_circuit_breaker("dividend").get_status(),
-            'fund_holder_circuit_breaker': get_circuit_breaker("fund_holder").get_status(),
-            'top10_holders_circuit_breaker': get_circuit_breaker("top10_holders").get_status(),
-            'financial_ext_circuit_breaker': get_circuit_breaker("financial_ext").get_status(),
+            'providers': self._ctx.provider_names,
+            'health': {k: v.__dict__ for k, v in self._ctx.health_snapshot.items()},
         }
 
-    def get_cctv_news(self, date: str = "") -> Optional[pd.DataFrame]:
-        """获取新闻联播文字稿（单源 AkshareFetcher）"""
-        fetcher = next((f for f in self._fetchers if f.name == "AkshareFetcher"), None)
-        if fetcher is None:
-            return None
-        try:
-            df = fetcher.get_cctv_news(date)
-            if df is not None and not df.empty:
-                df.attrs["source"] = fetcher.name
-                return df
-        except Exception as e:
-            _LOGGER.warning("[%s] 获取新闻联播文字稿失败: %s", fetcher.name, e)
-        return None
+    def fetch_akshare(self, func, *args, **kwargs):
+        """调用 akshare 函数，带磁盘缓存。"""
+        from ..cache import CacheStore
+        ttl = kwargs.pop("ttl", CACHE_TTLS["akshare_default"])
+        namespace = kwargs.pop("namespace", "akshare")
+        key = f"{func.__name__}:{args}:{sorted(kwargs.items())}"
+        store = CacheStore.get_store(namespace)
+        cached = store.get(key)
+        if cached is not None:
+            return cached
+        result = func(*args, **kwargs)
+        store.set(key, result, expire=ttl)
+        return result
 
-    # ==================== 美股多数据源方法 ====================
+    def fetch_with_cache(self, func, *args, **kwargs):
+        """通用：调用任意函数，带磁盘缓存。须传入 key 和 namespace。"""
+        from ..cache import CacheStore
+        ttl = kwargs.pop("ttl", 3600)
+        key = kwargs.pop("key", None)
+        namespace = kwargs.pop("namespace", "default")
+        store = CacheStore.get_store(namespace)
+        cached = store.get(key)
+        if cached is not None:
+            return cached
+        result = func(*args, **kwargs)
+        store.set(key, result, expire=ttl)
+        return result
 
-    def _get_us_fetcher(self, fetcher_name: str):
-        """按名查找可用的美股数据源（格式化器委托专用格式化方法时复用）。"""
-        for fetcher in self._fetchers:
-            if fetcher.name == fetcher_name and fetcher.is_available:
-                return fetcher
-        return None
 
-    def format_us_overview_report(self, overview: Dict[str, Any]) -> str:
-        """格式化美股公司概览报告（支持多数据源）"""
-        if not overview:
-            return "无数据"
 
-        source = overview.get('_data_source', 'unknown')
-
-        # AlphaVantage 有专用格式化方法
-        av = self._get_us_fetcher("AlphaVantage")
-        if av and source == "AlphaVantage":
-            return av.format_overview_report(overview)
-
-        # 通用 CSV 格式（yfinance 或其他）
-        lines = [
-            f"# {overview.get('Name', '')} ({overview.get('Symbol', '')})",
-            f"# 数据来源: {source}",
-            "",
-            "# 基本信息",
-            "行业,板块,国家,交易所",
-            f"{overview.get('Industry', '-')},{overview.get('Sector', '-')},{overview.get('Country', '-')},{overview.get('Exchange', '-')}",
-            "",
-            "# 估值指标",
-            "市值,市盈率(PE),远期市盈率,市净率(PB),市销率(PS),PEG比率",
-            f"${self._format_large_number(overview.get('MarketCapitalization'))},{overview.get('PERatio', '-')},{overview.get('ForwardPE', '-')},{overview.get('PriceToBookRatio', '-')},{overview.get('PriceToSalesRatioTTM', '-')},{overview.get('PEGRatio', '-')}",
-            "",
-            "# 盈利指标",
-            "每股收益(EPS),每股净资产,净利润率,营业利润率,ROE,ROA",
-            f"${overview.get('EPS', '-')},${overview.get('BookValue', '-')},{overview.get('ProfitMargin', '-')},{overview.get('OperatingMarginTTM', '-')},{overview.get('ReturnOnEquityTTM', '-')},{overview.get('ReturnOnAssetsTTM', '-')}",
-            "",
-            "# 股息信息",
-            "股息率,每股股息,除息日",
-            f"{overview.get('DividendYield', '-')},${overview.get('DividendPerShare', '-')},{overview.get('ExDividendDate', '-')}",
-            "",
-            "# 价格区间",
-            "52周最高,52周最低,50日均价,200日均价",
-            f"${overview.get('52WeekHigh', '-')},${overview.get('52WeekLow', '-')},${overview.get('50DayMovingAverage', '-')},${overview.get('200DayMovingAverage', '-')}",
-            "",
-            "# 分析师评级",
-            "目标价,强烈买入,买入,持有,卖出,强烈卖出",
-            f"${overview.get('AnalystTargetPrice', '-')},{overview.get('AnalystRatingStrongBuy', '-')},{overview.get('AnalystRatingBuy', '-')},{overview.get('AnalystRatingHold', '-')},{overview.get('AnalystRatingSell', '-')},{overview.get('AnalystRatingStrongSell', '-')}",
-        ]
-        return "\n".join(lines)
-
-    def _format_large_number(self, value) -> str:
-        """格式化大数字"""
-        if not value or value in ("", "None", "nan"):
-            return "-"
-        try:
-            num = float(value)
-            if num >= 1e12:
-                return f"{num/1e12:.2f}T"
-            elif num >= 1e9:
-                return f"{num/1e9:.2f}B"
-            elif num >= 1e6:
-                return f"{num/1e6:.2f}M"
-            else:
-                return f"{num:,.0f}"
-        except (ValueError, TypeError):
-            return str(value)
-
-    def format_us_news_report(self, news_data: Dict[str, Any], limit: int = 10) -> str:
-        """格式化美股新闻报告"""
-        fetcher = self._get_us_fetcher("AlphaVantage")
-        if fetcher is None:
-            return "AlphaVantage 数据源未配置"
-        return fetcher.format_news_report(news_data, limit)

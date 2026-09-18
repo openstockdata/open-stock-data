@@ -1,5 +1,5 @@
 """
-PytdxFetcher - 通达信数据源 (Priority 2.5)
+PytdxFetcher - 通达信数据源 
 
 数据来源：通达信行情服务器（pytdx 库）
 特点：免费、无需 Token、直连行情服务器、支持实时行情和历史K线
@@ -72,13 +72,12 @@ class PytdxFetcher(BaseFetcher):
     """
     通达信数据源
 
-    优先级：2（Akshare 之后，Baostock 之前）
     支持：A股日K线、实时行情
     不支持：港股、美股、ETF 实时行情
     """
 
     name = "PytdxFetcher"
-    priority = 2
+    priority = 1
     backend_group = "pytdx"
 
     SECURITY_LIST_PAGE_SIZE = 1000
@@ -175,7 +174,7 @@ class PytdxFetcher(BaseFetcher):
         retry=retry_if_exception_type(_PYTDX_NETWORK_EXCEPTIONS),
         reraise=True,
     )
-    def _fetch_raw_data(self, stock_code: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
+    def _fetch_daily_data(self, stock_code: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
         if is_us_code(stock_code) or is_hk_code(stock_code):
             raise DataFetchError(f"PytdxFetcher 不支持 {stock_code}")
 
@@ -203,7 +202,7 @@ class PytdxFetcher(BaseFetcher):
 
     def _fetch_raw_daily_data(self, stock_code: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
         """pytdx 本身就是未复权数据"""
-        return self._fetch_raw_data(stock_code, start_date, end_date)
+        return self._fetch_daily_data(stock_code, start_date, end_date)
 
     def _normalize_data(self, df: pd.DataFrame, stock_code: str) -> pd.DataFrame:
         df = df.copy()

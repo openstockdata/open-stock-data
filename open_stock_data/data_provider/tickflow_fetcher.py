@@ -24,7 +24,7 @@ class TickflowFetcher(BaseFetcher):
     """TickFlow REST API 数据获取器。"""
 
     name = "TickflowFetcher"
-    priority = 0
+    priority = 10  # 网络请求第一位
     backend_group = "tickflow"
 
     DEFAULT_API_URL = "https://api.tickflow.org"
@@ -144,7 +144,7 @@ class TickflowFetcher(BaseFetcher):
         df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
         return df
 
-    def _fetch_raw_data(
+    def _fetch_daily_data(
         self,
         stock_code: str,
         start_date: str,

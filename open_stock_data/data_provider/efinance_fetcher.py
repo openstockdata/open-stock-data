@@ -1,5 +1,5 @@
 """
-Efinance 数据获取器 (优先级 1)
+Efinance 数据获取器 
 使用 efinance 库获取东方财富 A 股数据
 """
 
@@ -24,7 +24,7 @@ class EfinanceFetcher(BaseFetcher):
     """Efinance 数据获取器"""
 
     name = "EfinanceFetcher"
-    priority = 1  # A 股次选
+    priority = 5  # 请求优先级
     backend_group = "eastmoney"
     _BACKEND_FAILURE_SCOPE_MAP = {
         "get_realtime_quote": "eastmoney:push2:realtime_quotes",
@@ -59,7 +59,7 @@ class EfinanceFetcher(BaseFetcher):
         retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
         reraise=True
     )
-    def _fetch_raw_data(
+    def _fetch_daily_data(
         self,
         stock_code: str,
         start_date: str,

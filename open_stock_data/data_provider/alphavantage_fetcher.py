@@ -44,7 +44,7 @@ class AlphaVantageFetcher(BaseFetcher):
     """
 
     name: str = "AlphaVantage"
-    priority: int = 4  # 美股首选（需配置 API key）
+    priority: int = 10  # 美股首选（需配置 API key）
     backend_group: str = "alphavantage"
 
     def __init__(self):
@@ -142,7 +142,7 @@ class AlphaVantageFetcher(BaseFetcher):
         retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
         reraise=True
     )
-    def _fetch_raw_data(
+    def _fetch_daily_data(
         self,
         stock_code: str,
         start_date: str,

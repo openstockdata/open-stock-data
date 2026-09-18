@@ -1,7 +1,6 @@
 """
 Baostock 数据获取器 (优先级 3)
-使用 baostock 库获取 A 股历史数据
-免费，无需 token
+使用 baostock 库获取 A 股历史数据，免费，无需 token
 """
 
 import logging
@@ -20,7 +19,7 @@ class BaostockFetcher(BaseFetcher):
     """Baostock 数据获取器"""
 
     name = "BaostockFetcher"
-    priority = 3
+    priority = 3  # A 股日线
     backend_group = "baostock"
 
     def __init__(self):
@@ -80,7 +79,7 @@ class BaostockFetcher(BaseFetcher):
         retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
         reraise=True
     )
-    def _fetch_raw_data(
+    def _fetch_daily_data(
         self,
         stock_code: str,
         start_date: str,
@@ -221,7 +220,7 @@ class BaostockFetcher(BaseFetcher):
 
                 rename_map = {
                     'code': '股票代码',
-                    'code_name': '股票代码',
+                    'code_name': '股票名称',
                     'name': '股票名称',
                     'industry': '行业',
                     'market': '市场',

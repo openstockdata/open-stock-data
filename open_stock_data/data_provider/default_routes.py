@@ -58,19 +58,16 @@ def _persist_fact(data, request, source) -> None:
 
 
 def create_default_routes() -> RouteRegistry:
-    daily_a = (
-        "EfinanceFetcher",
-        "AkshareFetcher",
-        "TushareFetcher",
-        "TickflowFetcher",
-        "PytdxFetcher",
-        "BaostockFetcher",
-    )
+    # daily_prices: Tickflow → Efinance → Akshare
+    # priority: LocalStore=100(缓存优先) > Tickflow=10 > Efinance=5 > Akshare=1 > Yfinance=3 > Tushare=0
+    # Note: LocalStoreFetcher 不实现 get_daily_data，但通过 LocalStore 缓存层服务
+    # 运行时可通过 client.provider_context.set_priority("TickflowFetcher", 20) 动态调整
+
     routes = [
         RouteSpec(
             Operation.DAILY_PRICES,
             StockType.A_STOCK,
-            daily_a,
+            ("TickflowFetcher", "TushareFetcher", "EfinanceFetcher", "AkshareFetcher", "YfinanceFetcher", "BaostockFetcher", "PytdxFetcher"),
             "get_daily_data",
             "daily",
             _daily_policy(),
@@ -78,7 +75,7 @@ def create_default_routes() -> RouteRegistry:
         RouteSpec(
             Operation.DAILY_PRICES,
             StockType.ETF,
-            ("EfinanceFetcher", "AkshareFetcher", "TickflowFetcher", "YfinanceFetcher", "BaostockFetcher"),
+            ("TickflowFetcher", "TushareFetcher", "EfinanceFetcher", "AkshareFetcher", "YfinanceFetcher"),
             "get_daily_data",
             "daily",
             _daily_policy(),
@@ -86,7 +83,7 @@ def create_default_routes() -> RouteRegistry:
         RouteSpec(
             Operation.DAILY_PRICES,
             StockType.HK,
-            ("TickflowFetcher", "YfinanceFetcher", "AkshareFetcher"),
+            ("YfinanceFetcher", "AkshareFetcher"),
             "get_daily_data",
             "daily",
             _daily_policy(),
@@ -94,7 +91,7 @@ def create_default_routes() -> RouteRegistry:
         RouteSpec(
             Operation.DAILY_PRICES,
             StockType.US,
-            ("TickflowFetcher", "YfinanceFetcher", "AlphaVantage"),
+            ("AlphaVantageFetcher", "YfinanceFetcher"),
             "get_daily_data",
             "daily",
             _daily_policy(),
@@ -102,7 +99,7 @@ def create_default_routes() -> RouteRegistry:
         RouteSpec(
             Operation.REALTIME_QUOTE,
             StockType.A_STOCK,
-            ("TickflowFetcher", "EfinanceFetcher", "TushareFetcher", "AkshareFetcher"),
+            ("TickflowFetcher", "TushareFetcher", "EfinanceFetcher", "AkshareFetcher", "PytdxFetcher"),
             "get_realtime_quote",
             "realtime",
             CachePolicy(lambda: _realtime_ttl(MarketType.A_STOCK)),
@@ -132,7 +129,7 @@ def create_default_routes() -> RouteRegistry:
         RouteSpec(
             Operation.REALTIME_QUOTE,
             StockType.US,
-            ("TickflowFetcher", "YfinanceFetcher", "AlphaVantage"),
+            ("TickflowFetcher", "YfinanceFetcher"),
             "get_realtime_quote",
             "realtime",
             CachePolicy(lambda: _realtime_ttl(MarketType.US_STOCK)),
@@ -168,7 +165,7 @@ def create_default_routes() -> RouteRegistry:
         RouteSpec(
             Operation.BELONG_BOARD,
             None,
-            ("LocalStoreFetcher", "EfinanceFetcher", "TushareFetcher", "AkshareFetcher"),
+            ("LocalStoreFetcher", "TushareFetcher", "EfinanceFetcher", "AkshareFetcher", "BaostockFetcher"),
             "get_belong_board",
             "board",
             CachePolicy(CACHE_TTLS["belong_board"]),
@@ -177,7 +174,7 @@ def create_default_routes() -> RouteRegistry:
         RouteSpec(
             Operation.BOARD_CONS,
             None,
-            ("LocalStoreFetcher", "AkshareFetcher", "TushareFetcher"),
+            ("LocalStoreFetcher", "TushareFetcher", "AkshareFetcher"),
             "get_board_cons",
             "board",
             persist=_persist_fact,
@@ -185,7 +182,7 @@ def create_default_routes() -> RouteRegistry:
         RouteSpec(
             Operation.BILLBOARD,
             None,
-            ("EfinanceFetcher", "AkshareFetcher", "TushareFetcher"),
+            ("TushareFetcher", "EfinanceFetcher", "AkshareFetcher"),
             "get_billboard",
             "billboard",
         ),
@@ -306,6 +303,56 @@ def create_default_routes() -> RouteRegistry:
             ("AlphaVantage",),
             "get_technical_indicator",
             "us_financials",
+        ),
+        # ---- Akshare 独有方法（业绩 / 分红 / 新闻）----
+        RouteSpec(
+            Operation.BID_ASK,
+            None,
+            ("AkshareFetcher",),
+            "get_bid_ask",
+            "bid_ask",
+        ),
+        RouteSpec(
+            Operation.EARNINGS_FORECAST,
+            None,
+            ("AkshareFetcher",),
+            "get_earnings_forecast",
+            "forecast",
+        ),
+        RouteSpec(
+            Operation.EARNINGS_REPORT,
+            None,
+            ("AkshareFetcher",),
+            "get_earnings_report",
+            "earnings",
+        ),
+        RouteSpec(
+            Operation.EARNINGS_EXPRESS,
+            None,
+            ("AkshareFetcher",),
+            "get_earnings_express",
+            "express",
+        ),
+        RouteSpec(
+            Operation.DIVIDEND_PLAN,
+            None,
+            ("AkshareFetcher",),
+            "get_dividend_plan",
+            "dividend_plan",
+        ),
+        RouteSpec(
+            Operation.DIVIDEND_CNINFO,
+            None,
+            ("AkshareFetcher",),
+            "get_dividend_cninfo",
+            "dividend_cninfo",
+        ),
+        RouteSpec(
+            Operation.CCTV_NEWS,
+            None,
+            ("AkshareFetcher",),
+            "get_cctv_news",
+            "cctv_news",
         ),
     ]
     return RouteRegistry(routes)

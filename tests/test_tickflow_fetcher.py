@@ -32,7 +32,7 @@ def clear_tickflow_env(monkeypatch):
 def test_init_uses_free_api_without_key():
     fetcher = TickflowFetcher()
 
-    assert fetcher.priority == 0
+    assert fetcher.priority == 10  # 网络请求第一位
     assert fetcher._base_url == "https://free-api.tickflow.org"
     assert fetcher._headers() == {"Accept": "application/json"}
 

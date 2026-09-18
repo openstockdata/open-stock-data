@@ -20,7 +20,7 @@ class ClientFetcher(BaseFetcher):
         self.quotes = quotes or {}
         self.snapshot = snapshot
 
-    def _fetch_raw_data(self, stock_code, start_date, end_date):
+    def _fetch_daily_data(self, stock_code, start_date, end_date):
         return None
 
     def _normalize_data(self, df, stock_code):
@@ -253,7 +253,7 @@ class AtomFetcher(BaseFetcher):
 
         return _call
 
-    def _fetch_raw_data(self, stock_code, start_date, end_date):
+    def _fetch_daily_data(self, stock_code, start_date, end_date):
         return None
 
     def _normalize_data(self, df, stock_code):
@@ -544,7 +544,7 @@ class DailyNetFetcher(BaseFetcher):
         self.calls = 0
         self.received = []
 
-    def _fetch_raw_data(self, stock_code, start_date, end_date):
+    def _fetch_daily_data(self, stock_code, start_date, end_date):
         return None
 
     def _normalize_data(self, df, stock_code):
