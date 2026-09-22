@@ -22,7 +22,7 @@ print(stock_realtime(symbol="01810.HK", market="hk"))
 
 ### 类型化数据 API（OpenStockDataClient）
 
-除文本工具外，库还提供类型化的 `OpenStockDataClient`。它以声明式静态路由 + 单一执行器实现多数据源故障转移，返回结构化的 `FetchResult`（含 `data` / `source` / `from_cache` / `attempts`），失败时抛 `AllSourcesFailed`（不返回 None 或错误字符串）：
+除文本工具外，库还提供类型化的 `OpenStockDataClient`。构造签名为 `OpenStockDataClient(providers=None, routes=None, *, cache=None, store=None)`——三者都可省略，缺省使用默认 provider、默认路由和内置缓存。它以声明式静态路由 + 单一执行器实现多数据源故障转移，返回结构化的 `FetchResult`（含 `data` / `source` / `fetched_at` / `from_cache` / `is_stale` / `attempts`），失败时抛 `AllSourcesFailed`（不返回 None 或错误字符串）：
 
 ```python
 from open_stock_data import get_default_client
@@ -71,7 +71,8 @@ flow = client.fund_flow("600519")                            # 分析类：源�
 | `OKX_BASE_URL` | 自定义 OKX API 基础地址，默认 `https://www.okx.com`。 |
 | `BINANCE_BASE_URL` | 自定义 Binance API 基础地址，默认 `https://www.binance.com`。 |
 | `NEWSNOW_CHANNELS` | NewsNow 新闻频道列表，多个频道用逗号分隔。 |
-| `ENABLE_EASTMONEY_PATCH` | 设为 `true` 后启用东方财富限流缓解补丁。 |
+| `LOCAL_STORE_PATH` | 本地 SQLite 长期存储路径，默认 `<缓存目录>/local_store.db`。 |
+| `PYTDX_SERVERS` | Pytdx 服务器列表（分号分隔的 `host:port`）；或用 `PYTDX_HOST` + `PYTDX_PORT` 指定单个服务器。 |
 
 示例：
 
@@ -90,7 +91,7 @@ export ALPHA_VANTAGE_API_KEY="your-api-key"
 - **`ProviderPlugin`** — 每个数据源实现的插件协议（`metadata`、`is_available`、`execute`、`report_health`）
 - **`ProviderContext`** — 共享上下文，管理所有 provider 的注册、健康指标和事件分发
 - **`DynamicRouter`** — 自适应路由器，运行时根据健康分（成功率、延迟、熔断状态）动态计算最优 fallback 顺序
-- **`OpenStockDataClient`** — 直接依赖 `ProviderContext`，无静态 provider 列表、无硬编码 fallback 链
+- **`OpenStockDataClient`** — 依赖 `ProviderContext`（缺省 `ProviderContext.default()`，也可构造时传入 `providers` dict 自定义），无硬编码 fallback 链
 
 ```
 OpenStockDataClient
@@ -120,48 +121,6 @@ priority 高的 provider 优先被调用，成功率/延迟只在同优先级之
 数据源状态可通过 `data_source_status()` 查看。
 
 完整的数据源能力对照和 Provider 路由配置详见 [docs/PROVIDER_ROUTING.md](docs/PROVIDER_ROUTING.md)。
-
-## 东方财富限流补丁
-
-当东方财富相关接口频繁出现 `RemoteDisconnected`、连接被关闭、请求被重置等问题时，可以开启内置补丁：
-
-```bash
-export ENABLE_EASTMONEY_PATCH=true
-```
-
-开启后会：
-
-- 为东方财富请求注入随机 `User-Agent`
-- 从匿名 web-report 接口获取并缓存 `nid18` token
-- 将 `nid18` 合并到现有 Cookie
-- **增加请求间隔**：push2 系域名（含 `82.push2` 等编号子域）1.0-4.0s，其他东财域名 0.5-1.5s
-- **push2 系域名额外限流**：并发数 (2) + 最小间隔 (0.8s) + 失败重试 (3)，分页爬取重灾区不再绕过节流
-- **共享 keep-alive Session**（`get_eastmoney_session()`）：东财直连爬虫复用连接，避免每页一次 TLS 握手
-
-**性能调整** (2026-07-07):
-- 请求间隔从 0-0.2s 增加到 0.5-1.2s
-- 最小间隔从 0.35s 增加到 0.8s
-- 并发数从 3 降低到 2
-- 重试次数从 2 增加到 3
-- **预期效果**: 降低东方财富连接中断频率、提升全市场快照稳定性；暂无可复现基准数据支撑具体百分比
-
-**节流口径修正** (2026-09-20):
-- 节流匹配从 `push2.eastmoney.com` 精确匹配改为覆盖 `*.push2.eastmoney.com` 子域（akshare 全市场快照走 `82.push2` 子域，此前完全绕开并发/间隔限制）
-- 修正 sleep 方向：push2 系间隔调整为 1.0-4.0s，其他域名 0.5-1.5s（此前重灾域名反而睡得更短）
-- akshare `_fetch_em_spot_page` 改用共享 keep-alive Session，UA 固定在会话级不再逐页轮换
-
-补丁作用于共享的 `requests.Session.request` 层，因此同时覆盖项目自身请求和依赖库中触发的东方财富请求。
-
-### 环境变量微调
-
-可通过以下环境变量自定义补丁参数：
-
-```bash
-export EASTMONEY_PUSH2_MAX_CONCURRENCY=2          # 并发数
-export EASTMONEY_PUSH2_MIN_INTERVAL_SECONDS=0.8   # 最小请求间隔（秒）
-export EASTMONEY_PUSH2_MAX_RETRIES=3              # 重试次数
-export EASTMONEY_PUSH2_RETRY_BACKOFF_SECONDS=2.0  # 重试间隔（秒）
-```
 
 ## 可用工具
 
@@ -203,6 +162,8 @@ export EASTMONEY_PUSH2_RETRY_BACKOFF_SECONDS=2.0  # 重试间隔（秒）
 | `stock_fund_flow` | 获取个股主力、超大单、大单、中单、小单资金流向。 |
 | `stock_sector_spot` | 获取个股所属行业和概念板块。 |
 | `stock_board_cons` | 获取行业或概念板块成分股。 |
+
+说明：`stock_sector_spot` 的所属板块（belong_board）结果经 `boards.py` 统一 schema，前几列固定为 `板块名称 / 板块代码 / 板块类型 / 股票代码 / 股票名称`，`板块类型` ∈ {industry, region, concept, unknown}，各数据源的其它原始列保留在后面。
 
 ### A 股估值与财务
 
