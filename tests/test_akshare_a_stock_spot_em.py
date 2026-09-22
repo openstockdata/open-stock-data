@@ -53,6 +53,18 @@ def page_payload(page_no, total=6):
     return {"total": total, "diff": rows}
 
 
+class DummySession:
+    """替身 Session：验证 _fetch_em_spot_page 走 _get_push2_session() 的连接复用通道。"""
+
+    def __init__(self, getter):
+        self._getter = getter
+        self.calls = []
+
+    def get(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return self._getter(*args, **kwargs)
+
+
 def test_fetch_spot_page_retries_network_error(monkeypatch):
     fetcher = AkshareFetcher()
     calls = 0
@@ -64,13 +76,32 @@ def test_fetch_spot_page_retries_network_error(monkeypatch):
             raise requests.ConnectionError("remote closed")
         return DummyResponse({"data": page_payload(1)})
 
-    monkeypatch.setattr(module.requests, "get", fake_get)
+    session = DummySession(fake_get)
+    # 替换类方法 _get_push2_session 返回替身 session
+    monkeypatch.setattr(AkshareFetcher, "_get_push2_session", classmethod(lambda cls: session))
     monkeypatch.setattr(module.time, "sleep", lambda *_args: None)
 
     result = fetcher._fetch_em_spot_page(1, 100)
 
     assert result == page_payload(1)
     assert calls == 2
+    # 不再逐页轮换 UA：请求头由共享 Session/补丁统一提供
+    assert all("headers" not in kwargs for _args, kwargs in session.calls)
+
+
+def test_fetch_spot_page_uses_shared_keepalive_session(monkeypatch):
+    fetcher = AkshareFetcher()
+
+    def fake_get(_url, params=None, **_kwargs):
+        return DummyResponse({"data": page_payload(int(params["pn"]))})
+
+    holder = DummySession(fake_get)
+    monkeypatch.setattr(AkshareFetcher, "_get_push2_session", classmethod(lambda cls: holder))
+    monkeypatch.setattr(module.time, "sleep", lambda *_args: None)
+
+    assert fetcher._fetch_em_spot_page(1, 100) == page_payload(1)
+    assert fetcher._fetch_em_spot_page(2, 100) == page_payload(2)
+    assert len(holder.calls) == 2
 
 
 def test_a_stock_snapshot_retries_missing_pages(monkeypatch):

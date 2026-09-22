@@ -18,7 +18,7 @@ from .plugin import ProviderPlugin, ProviderMetadata, ProviderHealthEvent
 from .context import ProviderContext
 from .providers import create_default_providers
 
-# 网络类异常：后端服务器不可达，应向上传播以触发同源跳过
+# 网络类异常：后端服务器不可达，向上传播由路由按统一健康体系处理
 NETWORK_EXCEPTIONS = (
     requests.exceptions.ConnectionError,
     requests.exceptions.Timeout,
@@ -32,7 +32,6 @@ from .types import (
 )
 from .columns import STANDARD_COLUMNS
 from .stock_code import StockType
-from .circuit_breaker import get_circuit_breaker
 from .market_config import MarketHoursConfig, MarketType
 
 # 从统一异常模块导入
@@ -66,7 +65,6 @@ class BaseFetcher(ProviderPlugin):
 
     name: str = "BaseFetcher"
     priority: int = 99
-    backend_group: str = ""  # 后端服务器分组，同组共享连接状态
 
     # User-Agent 池用于反爬
     USER_AGENTS = [
@@ -106,12 +104,6 @@ class BaseFetcher(ProviderPlugin):
     def get_random_user_agent(self) -> str:
         """获取随机 User-Agent"""
         return random.choice(self.USER_AGENTS)
-
-    def get_backend_failure_scope(self, method_name: str, *args, **kwargs) -> Optional[str]:
-        """返回后端失败作用域，默认按“供应商+方法”粒度隔离。"""
-        if not self.backend_group:
-            return None
-        return f"{self.backend_group}:{method_name}"
 
     _TRADING_DAY_TO_CALENDAR_RATIO = 1.8
     _TRADING_DAY_BUFFER = 30
@@ -168,7 +160,13 @@ class BaseFetcher(ProviderPlugin):
 
         try:
             df = self._fetch_daily_data(stock_code, start_date, end_date)
-            if df is None or df.empty:
+            if df is None:
+                return None
+            if df.empty:
+                # 配额冷却等原因的空结果（attrs 带 empty_reason）：原样透出，
+                # 路由记 EMPTY 时可读出原因写入 FetchAttempt；普通空结果仍回 None。
+                if isinstance(getattr(df, "attrs", None), dict) and df.attrs.get("empty_reason"):
+                    return df
                 return None
 
             df = self._normalize_data(df, stock_code)
@@ -199,7 +197,11 @@ class BaseFetcher(ProviderPlugin):
 
         try:
             df = self._fetch_raw_daily_data(stock_code, start_date, end_date)
-            if df is None or df.empty:
+            if df is None:
+                return None
+            if df.empty:
+                if isinstance(getattr(df, "attrs", None), dict) and df.attrs.get("empty_reason"):
+                    return df
                 return None
 
             df = self._normalize_data(df, stock_code)
@@ -365,7 +367,7 @@ class DataFetcherManager:
     def get_status(self) -> dict:
         return {
             'providers': self._ctx.provider_names,
-            'health': {k: v.__dict__ for k, v in self._ctx.health_snapshot.items()},
+            'health': {k: v.to_dict() for k, v in self._ctx.health_snapshot.items()},
         }
 
     def fetch_akshare(self, func, *args, **kwargs):

@@ -42,6 +42,8 @@ CACHE_TTLS = {
     "spot_closed": _env_ttl("CACHE_TTL_SPOT_CLOSED", 86400),
     "fund_flow_trading": _env_ttl("CACHE_TTL_FUND_FLOW_TRADING", 600),
     "fund_flow_closed": _env_ttl("CACHE_TTL_FUND_FLOW_CLOSED", 3600),
+    "margin_trading": _env_ttl("CACHE_TTL_MARGIN_TRADING", 3600),
+    "margin_closed": _env_ttl("CACHE_TTL_MARGIN_CLOSED", 6 * 3600),
     # Tushare 板块缓存
     "tushare_board": _env_ttl("CACHE_TTL_TUSHARE_BOARD", 86400 * 7),
     "tushare_board_snapshot": _env_ttl("CACHE_TTL_TUSHARE_SNAPSHOT", 86400 * 180),

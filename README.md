@@ -96,13 +96,13 @@ export ALPHA_VANTAGE_API_KEY="your-api-key"
 OpenStockDataClient
     ├── ProviderContext（唯一事实来源）
     │     ├── ProviderRegistry（运行时可插拔）
-    │     ├── HealthMetrics（健康分 = 成功率×100 - 延迟×0.1 - 失败数×5）
+    │     ├── HealthMetrics（综合分 = priority + 健康调整分，健康项 ≤ 0）
     │     └── EventBus（健康事件通知）
     └── DynamicRouter（按健康分排序，动态 fallback）
           └── RouteRegistry（静态路由定义：operation/method/validator/cache_policy）
 ```
 
-健康分高的 provider 优先被调用；熔断中的 provider 自动降为最低优先级；本地存储 `LocalStoreFetcher` 优先级最高（`priority=100`），命中即免网络。
+priority 高的 provider 优先被调用，成功率/延迟只在同优先级之间微调；连续失败的 provider 降为最低优先级但仍保留为兜底，冷却后自动恢复；本地存储 `LocalStoreFetcher` 优先级最高（`priority=100`），命中即免网络。
 
 **动态调整优先级：** 运行时可通过 `client.provider_context.set_priority("TickflowFetcher", 20)` 动态修改任意 provider 的优先级，立即生效，无需重启。详见 [PROVIDER_ROUTING.md](docs/PROVIDER_ROUTING.md)。
 
@@ -134,8 +134,9 @@ export ENABLE_EASTMONEY_PATCH=true
 - 为东方财富请求注入随机 `User-Agent`
 - 从匿名 web-report 接口获取并缓存 `nid18` token
 - 将 `nid18` 合并到现有 Cookie
-- **增加请求间隔** (0.5-1.2s) 和最小间隔 (0.8s)，降低触发限流的概率
-- **降低并发数** (2) 和增加重试次数 (3)，提升稳定性
+- **增加请求间隔**：push2 系域名（含 `82.push2` 等编号子域）1.0-4.0s，其他东财域名 0.5-1.5s
+- **push2 系域名额外限流**：并发数 (2) + 最小间隔 (0.8s) + 失败重试 (3)，分页爬取重灾区不再绕过节流
+- **共享 keep-alive Session**（`get_eastmoney_session()`）：东财直连爬虫复用连接，避免每页一次 TLS 握手
 
 **性能调整** (2026-07-07):
 - 请求间隔从 0-0.2s 增加到 0.5-1.2s
@@ -143,6 +144,11 @@ export ENABLE_EASTMONEY_PATCH=true
 - 并发数从 3 降低到 2
 - 重试次数从 2 增加到 3
 - **预期效果**: 降低东方财富连接中断频率、提升全市场快照稳定性；暂无可复现基准数据支撑具体百分比
+
+**节流口径修正** (2026-09-20):
+- 节流匹配从 `push2.eastmoney.com` 精确匹配改为覆盖 `*.push2.eastmoney.com` 子域（akshare 全市场快照走 `82.push2` 子域，此前完全绕开并发/间隔限制）
+- 修正 sleep 方向：push2 系间隔调整为 1.0-4.0s，其他域名 0.5-1.5s（此前重灾域名反而睡得更短）
+- akshare `_fetch_em_spot_page` 改用共享 keep-alive Session，UA 固定在会话级不再逐页轮换
 
 补丁作用于共享的 `requests.Session.request` 层，因此同时覆盖项目自身请求和依赖库中触发的东方财富请求。
 

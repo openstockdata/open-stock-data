@@ -43,9 +43,8 @@ class AlphaVantageFetcher(BaseFetcher):
     - 内部交易 (Insider Transactions)
     """
 
-    name: str = "AlphaVantage"
+    name: str = "AlphaVantageFetcher"
     priority: int = 10  # 美股首选（需配置 API key）
-    backend_group: str = "alphavantage"
 
     def __init__(self):
         super().__init__()

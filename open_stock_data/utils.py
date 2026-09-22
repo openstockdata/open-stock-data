@@ -25,13 +25,8 @@ except ImportError:
 
 from .data_provider import DataFetcherManager, NETWORK_EXCEPTIONS
 from .logging_safety import sanitize_for_logging
-from .eastmoney_patch import enable_eastmoney_patch
 
 _LOGGER = logging.getLogger(__name__)
-
-ENABLE_EASTMONEY_PATCH = os.getenv("ENABLE_EASTMONEY_PATCH", "false").strip().lower() in {"1", "true", "yes", "on"}
-if ENABLE_EASTMONEY_PATCH:
-    enable_eastmoney_patch()
 
 # 全局 HTTP Session（连接池复用 TCP 连接）
 _http_session = requests.Session()

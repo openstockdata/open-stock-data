@@ -226,7 +226,7 @@ class LocalStore:
             return None
         obj = json.loads(payload)
         if obj.get("format") == "frame":
-            data = pd.read_json(StringIO(json.dumps(obj["frame"])), orient="split")
+            data = pd.read_json(StringIO(json.dumps(obj["frame"])), orient="split", dtype=False)
         else:
             data = obj.get("data")
         return data, source, fetched_at
@@ -277,12 +277,11 @@ class LocalStoreFetcher:
 
     只读；任何异常都返回 None（视为未命中，回退网络），绝不因本地故障拖垮取数。
     不是 BaseFetcher 子类——只需 RouteExecutor 用到的鸭子接口（name/priority/
-    backend_group/is_available/get_backend_failure_scope + 各事实方法）。
+    is_available + 各事实方法）。
     """
 
     name = "LocalStoreFetcher"
     priority = 100
-    backend_group = ""
 
     @property
     def metadata(self):
@@ -296,11 +295,12 @@ class LocalStoreFetcher:
     def is_available(self) -> bool:
         return True
 
-    def get_backend_failure_scope(self, method_name: str, *args, **kwargs) -> Optional[str]:
-        return None
-
     def execute(self, method_name: str, *args, **kwargs) -> Any:
-        method = getattr(self, method_name)
+        method = getattr(self, method_name, None)
+        if method is None:
+            # 本地存储不覆盖的操作（如日线路由里的 get_daily_data）按“未命中”处理，
+            # 不能抛 AttributeError——那会被路由记成失败并把本地源降级。
+            return None
         return method(*args, **kwargs)
 
     def _read(self, kind: str, key: str):

@@ -79,6 +79,32 @@ def test_save_fact_dict_roundtrip(store):
     assert data["Name"] == "PDD Holdings"
 
 
+def test_fact_frame_preserves_stock_code_strings(store):
+    """回归：code 列含 leading zeros（如 000001、000002）必须保留字符串，
+    否则下游 df['代码'] == '000001' 匹配失败。"""
+    frame = pd.DataFrame([
+        {"代码": "000001", "名称": "平安银行", "板块名称": "银行"},
+        {"代码": "000002", "名称": "万科A", "板块名称": "地产"},
+        {"代码": "600519", "名称": "贵州茅台", "板块名称": "白酒"},
+    ])
+    store.save_fact("board_cons", "银行:industry", frame, source="AkshareFetcher")
+
+    loaded = store.load_fact("board_cons", "银行:industry")
+    assert loaded is not None
+    data, _, _ = loaded
+
+    # dtype 必须是字符串类型（object 或 pandas StringDtype），不能是 int
+    assert data["代码"].dtype.kind in ("O", "U", "S")  # object / unicode / string
+    assert data["代码"].iloc[0] == "000001"
+    assert data["代码"].iloc[1] == "000002"
+    assert data["代码"].iloc[2] == "600519"
+
+    # 关键：字符串匹配必须命中
+    assert not data[data["代码"] == "000001"].empty
+    assert not data[data["代码"] == "000002"].empty
+    assert not data[data["代码"] == "600519"].empty
+
+
 def test_last_expected_trade_date_weekday_logic():
     from datetime import datetime
     # 周三 17:00 → 当天

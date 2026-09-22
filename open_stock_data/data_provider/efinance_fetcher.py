@@ -10,6 +10,7 @@ import pandas as pd
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from .base import BaseFetcher, DataFetchError, NETWORK_EXCEPTIONS
+from .boards import normalize_belong_board
 from .types import (
     UnifiedRealtimeQuote,
     RealtimeSource,
@@ -25,15 +26,8 @@ class EfinanceFetcher(BaseFetcher):
 
     name = "EfinanceFetcher"
     priority = 5  # 请求优先级
-    backend_group = "eastmoney"
-    _BACKEND_FAILURE_SCOPE_MAP = {
-        "get_realtime_quote": "eastmoney:push2:realtime_quotes",
-        "get_batch_realtime_quotes": "eastmoney:push2:realtime_quotes",
-        "get_a_stock_spot": "eastmoney:push2:realtime_quotes",
-        "get_belong_board": "eastmoney:push2:slist_get",
-        "get_fund_flow": "eastmoney:http:push2his:fund_flow",
-        "get_billboard": "eastmoney:datacenter:daily_billboard",
-    }
+    # ulist 接口单次可查的 secid 上限（保守值）
+    _LATEST_QUOTE_BATCH_SIZE = 100
 
     def __init__(self):
         super().__init__()
@@ -46,12 +40,6 @@ class EfinanceFetcher(BaseFetcher):
         except ImportError:
             _LOGGER.warning("efinance 库未安装")
             self._available = False
-
-    def get_backend_failure_scope(self, method_name: str, *args, **kwargs) -> Optional[str]:
-        scope = self._BACKEND_FAILURE_SCOPE_MAP.get(method_name)
-        if scope:
-            return scope
-        return super().get_backend_failure_scope(method_name, *args, **kwargs)
 
     @retry(
         stop=stop_after_attempt(3),
@@ -185,13 +173,13 @@ class EfinanceFetcher(BaseFetcher):
         return df
 
     def _create_quote_from_row(self, row) -> Optional[UnifiedRealtimeQuote]:
-        """从 DataFrame 行创建 UnifiedRealtimeQuote"""
-        code = str(row.get('股票代码', ''))
-        if not code:
+        """从 DataFrame 行创建 UnifiedRealtimeQuote（兼容 clist 的 股票代码 与 ulist 的 代码 列名）"""
+        code = str(row.get('股票代码', '') or row.get('代码', '') or '')
+        if not code or code.lower() == 'nan':
             return None
         return UnifiedRealtimeQuote(
             code=code,
-            name=row.get('股票名称'),
+            name=row.get('股票名称', row.get('名称')),
             source=RealtimeSource.EFINANCE,
             price=safe_float(row.get('最新价')),
             change_pct=safe_float(row.get('涨跌幅')),
@@ -200,14 +188,18 @@ class EfinanceFetcher(BaseFetcher):
             amount=safe_float(row.get('成交额')),
             turnover_rate=safe_float(row.get('换手率')),
             amplitude=safe_float(row.get('振幅')),
+            volume_ratio=safe_float(row.get('量比')),
+            pe_ratio=safe_float(row.get('动态市盈率')),
+            total_mv=safe_float(row.get('总市值')),
+            circ_mv=safe_float(row.get('流通市值')),
             open_price=safe_float(row.get('今开')),
             high=safe_float(row.get('最高')),
             low=safe_float(row.get('最低')),
-            pre_close=safe_float(row.get('昨收')),
+            pre_close=safe_float(row.get('昨收', row.get('昨日收盘'))),
         )
 
     def _fetch_all_realtime_quotes(self) -> Dict[str, UnifiedRealtimeQuote]:
-        """获取全市场实时行情"""
+        """获取全市场实时行情（clist 分页，仅供全市场快照类需求使用）"""
         try:
             self.random_sleep(0.5, 1.5)
             df = self._ef.stock.get_realtime_quotes()
@@ -227,6 +219,57 @@ class EfinanceFetcher(BaseFetcher):
             _LOGGER.warning(f"[{self.name}] 获取全市场实时行情失败: {e}")
             return {}
 
+    @staticmethod
+    def _to_secid(code: str) -> Optional[str]:
+        """6 位沪深京代码 → 东财 secid（1=沪, 0=深/京）。
+
+        直接构造可避免 efinance 为每个代码先请求一次 search-codetable 解析 secid。
+        """
+        digits = str(code or "").strip().upper()
+        for suffix in (".SH", ".SZ", ".BJ"):
+            if digits.endswith(suffix):
+                digits = digits[: -len(suffix)]
+                break
+        if digits[:2] in ("SH", "SZ", "BJ"):
+            digits = digits[2:]
+        if len(digits) != 6 or not digits.isdigit():
+            return None
+        market = "1" if digits.startswith(("6", "9", "5")) else "0"
+        return f"{market}.{digits}"
+
+    def _fetch_latest_quotes(self, stock_codes: List[str]) -> Dict[str, UnifiedRealtimeQuote]:
+        """按代码点查实时行情（ulist 接口，一次请求返回一批），不再下载全市场。"""
+        result: Dict[str, UnifiedRealtimeQuote] = {}
+        secid_to_code: Dict[str, str] = {}
+        for code in stock_codes:
+            secid = self._to_secid(code)
+            if secid is None:
+                _LOGGER.debug(f"[{self.name}] 无法识别的代码，跳过: {code}")
+                continue
+            secid_to_code.setdefault(secid, str(code).strip())
+
+        secids = list(secid_to_code)
+        for start in range(0, len(secids), self._LATEST_QUOTE_BATCH_SIZE):
+            chunk = secids[start:start + self._LATEST_QUOTE_BATCH_SIZE]
+            try:
+                self.random_sleep(0.2, 0.6)
+                df = self._ef.stock.get_latest_quote(chunk, quote_id_mode=True)
+            except NETWORK_EXCEPTIONS:
+                raise
+            except Exception as e:
+                _LOGGER.warning(f"[{self.name}] 获取实时行情失败({len(chunk)} 只): {e}")
+                continue
+            if df is None or df.empty:
+                continue
+            for _, row in df.iterrows():
+                quote = self._create_quote_from_row(row)
+                if quote is None:
+                    continue
+                original = secid_to_code.get(str(row.get("行情ID", "")), quote.code)
+                quote.code = original
+                result[original] = quote
+        return result
+
     def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
         """获取实时行情（仅支持A股个股，不支持ETF和港股）"""
         if not self._available:
@@ -237,7 +280,7 @@ class EfinanceFetcher(BaseFetcher):
             _LOGGER.debug(f"[{self.name}] ETF {stock_code} 不支持实时行情，跳过")
             return None
 
-        quotes = self._fetch_all_realtime_quotes()
+        quotes = self._fetch_latest_quotes([stock_code])
         return quotes.get(stock_code)
 
     def get_batch_realtime_quotes(
@@ -254,7 +297,7 @@ class EfinanceFetcher(BaseFetcher):
             _LOGGER.debug(f"[{self.name}] 批量查询中无A股个股，跳过")
             return {}
 
-        quotes = self._fetch_all_realtime_quotes()
+        quotes = self._fetch_latest_quotes(a_stock_codes)
         return {code: quotes[code] for code in a_stock_codes if code in quotes}
 
     def get_base_info(self, stock_code: str) -> Optional[Dict]:
@@ -285,14 +328,16 @@ class EfinanceFetcher(BaseFetcher):
             return None
 
     def get_belong_board(self, stock_code: str) -> Optional[pd.DataFrame]:
-        """获取所属板块"""
+        """获取所属板块（东财 slist：行业 + 地域 + 概念），输出统一 schema（见 boards.py）"""
         if not self._available:
             return None
 
         try:
             self.random_sleep(0.5, 1.0)
             df = self._ef.stock.get_belong_board(stock_code)
-            return df
+            if df is None or df.empty:
+                return None
+            return normalize_belong_board(df)
         except NETWORK_EXCEPTIONS:
             raise
         except Exception as e:
@@ -342,9 +387,8 @@ class EfinanceFetcher(BaseFetcher):
             return None
 
         _LOGGER.debug(
-            "[%s] 开始获取全市场A股行情: api=ef.stock.get_realtime_quotes, backend_group=%s",
+            "[%s] 开始获取全市场A股行情: api=ef.stock.get_realtime_quotes",
             self.name,
-            self.backend_group or "-",
         )
 
         try:

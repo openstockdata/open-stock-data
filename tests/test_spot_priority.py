@@ -15,21 +15,23 @@ def _providers(operation, market):
 
 
 def test_spot_route_priority_order():
-    """全市场快照优先级：Efinance → Akshare。"""
+    """全市场快照优先级：Akshare → Efinance（运行时实际顺序由 priority 健康分决定）。"""
     assert _providers(Operation.A_STOCK_SNAPSHOT, StockType.A_STOCK) == (
-        "EfinanceFetcher",
         "AkshareFetcher",
+        "EfinanceFetcher",
     )
 
 
-def test_spot_route_disables_shared_backend_skip():
-    """快照路由允许同 backend 的 Efinance/Akshare 都尝试（不做同源跳过）。"""
+def test_spot_route_has_no_shared_backend_skip():
+    """同后端跳过机制已删除：RouteSpec 不再有 skip_shared_backend 字段，
+    快照路由的 Efinance/Akshare 按统一健康体系逐个尝试。"""
     route = create_default_routes().resolve(RouteRequest(Operation.A_STOCK_SNAPSHOT, StockType.A_STOCK))
-    assert route.skip_shared_backend_after_network_error is False
+    assert not hasattr(route, "skip_shared_backend_after_network_error")
 
 
 def test_daily_route_priority_tickflow_first():
-    """A股日线：Tickflow 优先级最高（priority=10），其次 Efinance(5)，再次 Akshare(1)。"""
+    """A股日线：Tickflow 优先级最高（priority=10），其次 Efinance(5)，再次 Akshare(4)。
+    providers 元组是候选名单，实际回退顺序由 priority + 健康分动态决定。"""
     providers = _providers(Operation.DAILY_PRICES, StockType.A_STOCK)
     assert "TickflowFetcher" in providers and "EfinanceFetcher" in providers and "AkshareFetcher" in providers
     assert providers.index("TickflowFetcher") < providers.index("EfinanceFetcher")

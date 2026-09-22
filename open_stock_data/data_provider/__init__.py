@@ -19,6 +19,11 @@ from .columns import (
     COLUMN_MAPPING_TO_CN,
     COLUMN_MAPPING_TO_EN,
 )
+from .boards import (
+    normalize_belong_board,
+    industry_board_name,
+    BELONG_BOARD_LEADING_COLUMNS,
+)
 from .stock_code import (
     StockType,
     is_etf_code,
@@ -31,12 +36,6 @@ from .stock_code import (
     validate_stock_type,
     market_to_stock_type,
     stock_type_to_market,
-)
-from .circuit_breaker import (
-    CircuitBreaker,
-    CircuitBreakerState,
-    get_circuit_breaker,
-    all_circuit_breaker_names,
 )
 from .plugin import ProviderPlugin, ProviderMetadata, ProviderHealth, ProviderHealthEvent
 from .context import ProviderContext
@@ -75,8 +74,6 @@ __all__ = [
     "UnifiedRealtimeQuote",
     "ChipDistribution",
     "RealtimeSource",
-    "CircuitBreaker",
-    "CircuitBreakerState",
     "StockType",
     # 异常
     "DataFetchError",
@@ -86,14 +83,14 @@ __all__ = [
     "classify_exception",
     "get_error_category",
     "NETWORK_EXCEPTIONS",
-    # 熔断器
-    "get_circuit_breaker",
-    "all_circuit_breaker_names",
     # 工具函数
     "safe_float",
     "safe_int",
     "to_chinese_columns",
     "to_english_columns",
+    "normalize_belong_board",
+    "industry_board_name",
+    "BELONG_BOARD_LEADING_COLUMNS",
     "is_etf_code",
     "is_hk_code",
     "is_us_code",

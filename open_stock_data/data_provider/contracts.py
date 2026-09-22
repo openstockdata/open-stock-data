@@ -129,12 +129,11 @@ class RouteSpec:
     operation: Operation
     market: Optional[StockType]
     providers: tuple[str, ...]
+    """候选数据源名单（能力过滤）；实际回退顺序由 ProviderContext 按综合分实时排序。"""
     method_name: str
-    circuit_breaker: str
     cache_policy: Optional[CachePolicy] = None
     empty_is_failure: bool = True
     validator: Optional[ResultValidator] = None
-    skip_shared_backend_after_network_error: bool = True
     batch_method: Optional[str] = None
     persist: Optional[PersistHook] = None
     """成功后回写钩子 persist(data, request, source_name)——用于本地长期存储；

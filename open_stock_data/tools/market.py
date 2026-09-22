@@ -327,29 +327,24 @@ def data_source_status():
 
         # 数据源列表
         lines.append("# 数据源")
-        lines.append("名称,状态,优先级")
-        for fetcher in status.get('fetchers', []):
-            available = "OK" if fetcher['available'] else "FAIL"
-            lines.append(f"{fetcher['name']},{available},{fetcher['priority']}")
+        lines.append("名称,状态,熔断态")
+        health = status.get('health', {})
+        for name in status.get('providers', []):
+            state = health.get(name, {})
+            available = "熔断跳过" if state.get('circuit_state') == 'OPEN' else "OK"
+            lines.append(f"{name},{available},{state.get('circuit_state') or '-'}")
 
-        # 熔断器状态
-        lines.append("# 熔断器状态")
-        lines.append("类型,数据源,状态,失败次数")
-
-        for name, breaker_status in [
-            ("日线数据", status.get('daily_circuit_breaker', {})),
-            ("实时行情", status.get('realtime_circuit_breaker', {})),
-            ("筹码分布", status.get('chip_circuit_breaker', {})),
-            ("资金流向", status.get('fund_flow_circuit_breaker', {})),
-            ("板块数据", status.get('board_circuit_breaker', {})),
-            ("龙虎榜", status.get('billboard_circuit_breaker', {})),
-            ("融资融券", status.get('margin_circuit_breaker', {})),
-            ("美股基本面", status.get('us_financials_circuit_breaker', {})),
-        ]:
-            if breaker_status:
-                for source, state in breaker_status.items():
-                    state_label = "正常" if state['state'] == 'closed' else "已熔断"
-                    lines.append(f"{name},{source},{state_label},{state['failure_count']}")
+        # 健康状态（统一 ProviderHealth 体系：成功率/延迟/连续失败/熔断态）
+        lines.append("# 健康状态")
+        lines.append("数据源,状态,连续失败,成功率,平均延迟ms,评分,冷却原因")
+        for source, state in status.get('health', {}).items():
+            state_label = "熔断跳过" if state.get('circuit_state') == 'OPEN' else (
+                "半开探测" if state.get('circuit_state') == 'HALF_OPEN' else "正常")
+            lines.append(
+                f"{source},{state_label},{state.get('failure_count')},"
+                f"{state.get('success_rate')},{state.get('avg_latency_ms')},"
+                f"{state.get('score')},{state.get('block_reason') or '-'}"
+            )
 
         return "\n".join(lines)
     except Exception as e:

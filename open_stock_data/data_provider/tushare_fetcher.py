@@ -8,16 +8,45 @@ import logging
 import threading
 import time
 from collections import deque
+from datetime import datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from .base import BaseFetcher, DataFetchError, RateLimitError, NETWORK_EXCEPTIONS
+from .base import BaseFetcher, DataFetchError, NETWORK_EXCEPTIONS
+from .boards import normalize_belong_board
 from .types import UnifiedRealtimeQuote, RealtimeSource, safe_float
 from ..cache import CACHE_TTLS, CacheStore
 
 _LOGGER = logging.getLogger(__name__)
+
+_BEIJING_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def seconds_until_beijing_midnight(now: Optional[datetime] = None) -> float:
+    """到北京时间次日 0 点的秒数（Tushare 日配额按自然日重置）。
+
+    固定 21600s 的问题：对 5 次/天 的接口，白天触发后 6 小时仍在同一天，
+    重试必败还白烧一次配额。按次日 0 点 +60s 缓冲计算，一次到位。
+    """
+    beijing_now = now or datetime.now(_BEIJING_TZ)
+    if beijing_now.tzinfo is None:
+        beijing_now = beijing_now.replace(tzinfo=_BEIJING_TZ)
+    else:
+        beijing_now = beijing_now.astimezone(_BEIJING_TZ)
+    next_midnight = (beijing_now + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return max(60.0, (next_midnight - beijing_now).total_seconds() + 60.0)
+
+
+def quota_empty_df(reason: str) -> pd.DataFrame:
+    """配额冷却期的空结果：attrs 携带原因，路由记 EMPTY 时写入 FetchAttempt.reason。"""
+    df = pd.DataFrame()
+    df.attrs["empty_reason"] = reason
+    return df
 
 
 class TushareFetcher(BaseFetcher):
@@ -25,7 +54,6 @@ class TushareFetcher(BaseFetcher):
 
     name = "TushareFetcher"
     priority = 9  # A 股（需配置 token）
-    backend_group = "tushare"
 
     # 限流配置：免费版 50次/分钟
     RATE_LIMIT = 50
@@ -34,9 +62,13 @@ class TushareFetcher(BaseFetcher):
     RATE_WAIT_BUFFER = 2.0
     _rate_limit_lock = threading.Lock()
     _request_timestamps = deque()
+    # 各接口的配额冷却：api -> (截止时刻 monotonic, 原因)。
+    # Tushare 的配额按接口独立计量，同一 token 全局共享，因此放在类上。
+    _api_blocked_until: dict = {}
 
     def __init__(self):
         super().__init__()
+        self._last_empty_reason: str = ""
         self._api = None
 
         # 从环境变量获取 token
@@ -54,6 +86,11 @@ class TushareFetcher(BaseFetcher):
         else:
             _LOGGER.info("未配置 TUSHARE_TOKEN，TushareFetcher 不可用")
             self._available = False
+
+    def execute(self, method_name: str, *args, **kwargs):
+        """每次调用前清空上次的配额原因，避免陈旧原因污染本次的 EMPTY 记录。"""
+        self._last_empty_reason = ""
+        return super().execute(method_name, *args, **kwargs)
 
     def _check_rate_limit(self):
         """检查限流，按服务端配额预留安全余量，避免卡点触发 50次/分钟。"""
@@ -102,16 +139,19 @@ class TushareFetcher(BaseFetcher):
         检查是否为限流/权限错误
 
         返回: (is_rate_limit, limit_type, retry_after_seconds)
-        limit_type: 'minute_limit'(分钟限制) | 'daily_limit'(日限制) | 'no_permission'(无权限) | 'unknown'
+        limit_type: 'minute_limit' | 'hourly_limit' | 'daily_limit' | 'no_permission' | 'unknown'
         retry_after: 建议等待秒数
+
+        Tushare 的文案形如 “抱歉，您每分钟最多访问该接口50次” /
+        “抱歉，您访问接口(concept)频率超限(1次/小时)” / “抱歉，您没有访问该接口的权限”。
         """
         msg_lower = error_msg.lower()
+        quota_words = ('超限', '限制', '配额', '上限', 'limit', 'quota', 'exceed')
+        mentions_quota = any(w in msg_lower for w in quota_words) or '频率' in error_msg
 
-        # 分钟级限制：每分钟最多访问N次。Tushare 常见文案是 “50次/分钟”。
+        # 分钟级：每分钟最多访问N次
         if (
-            '每分钟' in error_msg
-            or '次/分钟' in error_msg
-            or '/分钟' in error_msg
+            any(k in error_msg for k in ('每分钟', '次/分钟', '/分钟'))
             or 'per minute' in msg_lower
             or 'frequency' in msg_lower
             or ('频率超限' in error_msg and '分钟' in error_msg)
@@ -119,41 +159,99 @@ class TushareFetcher(BaseFetcher):
             # 分钟限制应该等待2分钟（120秒）让额度重置
             return True, 'minute_limit', 120
 
-        # 小时级限制：每小时最多访问N次
-        if '每小时' in error_msg or 'per hour' in msg_lower:
-            # 小时限制应该等待5分钟（300秒）
-            return True, 'daily_limit', 300
+        # 小时级：频率超限(1次/小时)
+        if (
+            any(k in error_msg for k in ('每小时', '次/小时', '/小时'))
+            or 'per hour' in msg_lower
+            or ('频率超限' in error_msg and '小时' in error_msg)
+        ):
+            return True, 'hourly_limit', 3600
 
-        # 日限制：天总量上限
-        if '日' in error_msg or 'daily' in msg_lower:
-            # 日限制应该等到第二天，暂时用6小时（21600秒）
-            return True, 'daily_limit', 21600
+        # 日级：只在明确写出“每日/每天/次/日”或同时出现配额字样时判定，
+        # 避免 “trade_date 日期格式错误”、接口名 “(daily)” 这类普通文本被当作日配额。
+        if (
+            any(k in error_msg for k in ('每日', '每天', '次/日', '次/天', '/日', '/天'))
+            or 'per day' in msg_lower
+            or 'daily limit' in msg_lower
+            or ('日' in error_msg and mentions_quota)
+        ):
+            # 日配额按北京时间自然日重置：冷却到次日 0 点（+60s 缓冲）。
+            # 固定 21600s 的问题：白天触发后 6 小时仍在同一天，重试必败还白烧配额。
+            return True, 'daily_limit', seconds_until_beijing_midnight()
 
         # 无权限：没有接口访问权限
-        if '权限' in error_msg or 'permission' in msg_lower or '无权限' in error_msg:
+        if '权限' in error_msg or 'permission' in msg_lower:
             # 无权限应该长期熔断（1小时）
             return True, 'no_permission', 3600
 
-        # 配额相关
-        if any(kw in msg_lower for kw in ('quota', 'limit', '配额')):
-            # 通用配额限制，等待5分钟
+        # 频率超限但未写明单位 / 通用配额
+        if '频率超限' in error_msg or any(kw in msg_lower for kw in ('quota', 'limit', '配额')):
             return True, 'unknown', 300
 
         return False, 'none', 0
 
-    def _raise_rate_limit_error(self, error: Exception, context: str = ""):
-        """检测限流错误并抛出带类型的RateLimitError，非限流错误不处理"""
+    @classmethod
+    def _reset_quota_state(cls) -> None:
+        """清空接口冷却状态（测试用）。"""
+        with cls._rate_limit_lock:
+            cls._api_blocked_until.clear()
+
+    def _quota_block_reason(self, api: str) -> Optional[str]:
+        """接口冷却中的原因（未冷却返回 None）。兼容旧的纯 float 存量值。"""
+        with self._rate_limit_lock:
+            blocked = self._api_blocked_until.get(api)
+            if blocked is None:
+                return None
+            if isinstance(blocked, (tuple, list)):
+                until, reason = blocked[0], blocked[1] if len(blocked) > 1 else ""
+            else:
+                until, reason = blocked, ""
+            remaining = until - time.monotonic()
+            if remaining <= 0:
+                self._api_blocked_until.pop(api, None)
+                return None
+            return reason or f"tushare {api} 配额冷却中（剩余 {remaining:.0f}s）"
+
+    def _quota_available(self, api: str) -> bool:
+        """接口是否不在配额冷却期。冷却中调用方返回配额空结果让路由回退。"""
+        return self._quota_block_reason(api) is None
+
+    def _quota_empty(self, api: str, default: str = "") -> pd.DataFrame:
+        """配额冷却的空结果：attrs + 实例级原因双通道，供路由记入 FetchAttempt。"""
+        reason = self._quota_block_reason(api) or default or f"tushare {api} 配额冷却中"
+        self._last_empty_reason = reason
+        _LOGGER.debug(f"[{self.name}] 接口 {api} 处于配额冷却期，跳过: {reason}")
+        return quota_empty_df(reason)
+
+    def _note_rate_limit(self, error: Exception, context: str = "", api: Optional[str] = None) -> bool:
+        """识别限流/配额错误：记下该接口的冷却截止时间并返回 True；非限流错误返回 False。
+
+        Tushare 的配额按接口独立计量，所以只冷却出错的接口、由调用方返回配额空结果
+        （attrs 携带原因）让路由记 EMPTY 回退到下一数据源；不向路由层抛 RateLimitError——
+        那会把同组路由上的 Tushare 整体熔断（例如 concept 超限却连累走离线快照的 belong_board）。
+        日配额冷却到北京时间次日 0 点（自然日重置），其它档位用固定秒数。
+        """
         is_limit, limit_type, retry_after = self._is_rate_limit_error(str(error))
         if not is_limit:
-            return
+            return False
+        if limit_type == "daily_limit":
+            # _is_rate_limit_error 内已按次日 0 点计算；此处兜底重算，防止调用方直接伪造类型。
+            retry_after = seconds_until_beijing_midnight()
+        reason = f"tushare {api or '-'} {limit_type}冷却{retry_after:.0f}s: {error}"
+        if api:
+            with self._rate_limit_lock:
+                self._api_blocked_until[api] = (time.monotonic() + retry_after, reason)
+        self._last_empty_reason = reason
         type_label = {
             'minute_limit': '【分钟限制】',
+            'hourly_limit': '【小时限制】',
             'daily_limit': '【日限制】',
             'no_permission': '【无权限】',
         }.get(limit_type, '【配额超限】')
-        msg = f"Tushare 配额超限: {error}"
-        _LOGGER.warning(f"[{self.name}] {type_label}{context}: {error} (冷却{retry_after}秒)")
-        raise RateLimitError(msg, limit_type=limit_type, retry_after=retry_after)
+        _LOGGER.warning(
+            f"[{self.name}] {type_label}{context}: {error} (接口 {api or '-'} 冷却 {retry_after}s)"
+        )
+        return True
 
     @retry(
         stop=stop_after_attempt(3),
@@ -170,6 +268,8 @@ class TushareFetcher(BaseFetcher):
         """获取原始数据"""
         if not self._available or self._api is None:
             return None
+        if not self._quota_available("daily"):
+            return self._quota_empty("daily")
 
         self._check_rate_limit()
 
@@ -197,7 +297,8 @@ class TushareFetcher(BaseFetcher):
         except NETWORK_EXCEPTIONS:
             raise
         except Exception as e:
-            self._raise_rate_limit_error(e, f"获取 {stock_code} K线")
+            if self._note_rate_limit(e, f"获取 {stock_code} K线", api="daily"):
+                return self._quota_empty("daily")
             _LOGGER.warning(f"[{self.name}] 获取 {stock_code} 数据失败: {e}")
             raise DataFetchError(f"获取数据失败: {e}")
 
@@ -210,6 +311,8 @@ class TushareFetcher(BaseFetcher):
         """获取未复权日线数据。"""
         if not self._available or self._api is None:
             return None
+        if not self._quota_available("daily"):
+            return self._quota_empty("daily")
 
         self._check_rate_limit()
         try:
@@ -222,7 +325,8 @@ class TushareFetcher(BaseFetcher):
         except NETWORK_EXCEPTIONS:
             raise
         except Exception as e:
-            self._raise_rate_limit_error(e, f"获取 {stock_code} raw K线")
+            if self._note_rate_limit(e, f"获取 {stock_code} raw K线", api="daily"):
+                return self._quota_empty("daily")
             _LOGGER.warning(f"[{self.name}] 获取 {stock_code} 未复权日线失败: {e}")
             raise DataFetchError(f"获取数据失败: {e}")
 
@@ -276,6 +380,8 @@ class TushareFetcher(BaseFetcher):
         """获取资金流向"""
         if not self._available or self._api is None:
             return None
+        if not self._quota_available("moneyflow"):
+            return self._quota_empty("moneyflow")
 
         try:
             self._check_rate_limit()
@@ -309,7 +415,8 @@ class TushareFetcher(BaseFetcher):
             df = df.rename(columns=column_mapping)
             return df.head(10)
         except Exception as e:
-            self._raise_rate_limit_error(e, "获取资金流向")
+            if self._note_rate_limit(e, "获取资金流向", api="moneyflow"):
+                return self._quota_empty("moneyflow")
             _LOGGER.warning(f"[{self.name}] 获取资金流向失败: {e}")
             return None
 
@@ -317,6 +424,8 @@ class TushareFetcher(BaseFetcher):
         """获取龙虎榜统计"""
         if not self._available or self._api is None:
             return None
+        if not self._quota_available("top_list"):
+            return self._quota_empty("top_list")
 
         try:
             self._check_rate_limit()
@@ -347,7 +456,8 @@ class TushareFetcher(BaseFetcher):
             df = df.rename(columns=column_mapping)
             return df
         except Exception as e:
-            self._raise_rate_limit_error(e, "获取龙虎榜")
+            if self._note_rate_limit(e, "获取龙虎榜", api="top_list"):
+                return self._quota_empty("top_list")
             _LOGGER.warning(f"[{self.name}] 获取龙虎榜失败: {e}")
             return None
 
@@ -362,6 +472,8 @@ class TushareFetcher(BaseFetcher):
             _LOGGER.debug(f"[{self.name}] 命中离线行业快照: rows={len(cached)}")
             return cached
 
+        if not self._quota_available("stock_basic"):
+            return self._quota_empty("stock_basic")
         self._check_rate_limit()
         df = self._api.stock_basic(
             list_status='L',
@@ -375,15 +487,71 @@ class TushareFetcher(BaseFetcher):
         _LOGGER.debug(f"[{self.name}] 已刷新离线行业快照: rows={len(df)}")
         return df
 
+    def _get_concept_list(self) -> Optional[pd.DataFrame]:
+        """概念板块列表（concept 接口配额仅 1 次/小时，命中磁盘缓存即免请求）。"""
+        key = "tushare_concept_list"
+        cached = self._board_store.get(key)
+        if isinstance(cached, pd.DataFrame) and not cached.empty:
+            _LOGGER.debug(f"[{self.name}] 命中概念板块列表缓存: rows={len(cached)}")
+            return cached
+
+        if not self._quota_available("concept"):
+            return self._quota_empty("concept")
+        self._check_rate_limit()
+        try:
+            _LOGGER.debug(f"[{self.name}] 调用 concept API 查询概念板块列表")
+            concepts = self._api.concept()
+        except NETWORK_EXCEPTIONS:
+            raise
+        except Exception as e:
+            if self._note_rate_limit(e, "获取概念板块列表", api="concept"):
+                return self._quota_empty("concept")
+            _LOGGER.warning(f"[{self.name}] 获取概念板块列表失败: {e}")
+            return None
+
+        if concepts is None or concepts.empty:
+            _LOGGER.warning(f"[{self.name}] concept API 返回空结果")
+            return None
+        self._board_store.set(key, concepts, expire=CACHE_TTLS["tushare_board"])
+        return concepts
+
+    def _fetch_concept_cons(self, board_name: str) -> Optional[pd.DataFrame]:
+        concepts = self._get_concept_list()
+        if concepts is None:
+            return None
+        if concepts.empty:
+            if concepts.attrs.get("empty_reason"):
+                return concepts
+            return None
+
+        matched = concepts[concepts['name'].astype(str).str.contains(board_name, na=False, regex=False)]
+        if matched.empty:
+            _LOGGER.debug(f"[{self.name}] 未找到匹配的概念板块: {board_name}")
+            return None
+
+        concept_code = matched.iloc[0]['code']
+        if not self._quota_available("concept_detail"):
+            return self._quota_empty("concept_detail")
+        self._check_rate_limit()
+        _LOGGER.debug(f"[{self.name}] 概念板块 '{board_name}' 对应代码: {concept_code}, 调用 concept_detail API")
+        df = self._api.concept_detail(id=concept_code)
+        _LOGGER.debug(f"[{self.name}] concept_detail 返回 {len(df) if df is not None and not df.empty else 0} 条记录")
+        return df
+
     def get_belong_board(self, stock_code: str) -> Optional[pd.DataFrame]:
-        """获取所属板块，优先从离线行业快照读取。"""
+        """获取所属板块，优先从离线行业快照读取。输出为统一 schema（见 boards.py）。"""
         if not self._available or self._api is None:
             return None
 
         try:
             ts_code = self._convert_stock_code(stock_code)
             snapshot = self._get_board_stock_basic_snapshot()
-            if snapshot is None or snapshot.empty:
+            if snapshot is None:
+                return None
+            if snapshot.empty:
+                # 配额冷却的空快照：原样透出，attrs 里的原因供路由记入 FetchAttempt
+                if snapshot.attrs.get("empty_reason"):
+                    return snapshot
                 return None
 
             df = snapshot[snapshot['ts_code'] == ts_code].copy()
@@ -399,9 +567,10 @@ class TushareFetcher(BaseFetcher):
                 'list_date': '上市日期',
             }
             df = df.rename(columns=column_mapping)
-            return df
+            return normalize_belong_board(df)
         except Exception as e:
-            self._raise_rate_limit_error(e, "获取所属板块")
+            if self._note_rate_limit(e, "获取所属板块", api="stock_basic"):
+                return self._quota_empty("stock_basic")
             _LOGGER.warning(f"[{self.name}] 获取所属板块失败: {e}")
             return None
 
@@ -417,35 +586,30 @@ class TushareFetcher(BaseFetcher):
             _LOGGER.debug(f"[{self.name}] 命中缓存: {cache_key}")
             return cached
 
+        api_name = "stock_basic" if board_type == "industry" else "concept_detail"
         try:
             _LOGGER.debug(f"[{self.name}] 开始获取{board_type}板块成分股: {board_name}")
 
             if board_type == "industry":
                 _LOGGER.debug(f"[{self.name}] 从离线行业快照筛选板块: {board_name}")
                 snapshot = self._get_board_stock_basic_snapshot()
-                if snapshot is None or snapshot.empty:
+                if snapshot is None:
+                    return None
+                if snapshot.empty:
+                    if snapshot.attrs.get("empty_reason"):
+                        return snapshot
                     return None
                 df = snapshot[snapshot['industry'] == board_name].copy()
                 _LOGGER.debug(f"[{self.name}] 离线行业快照筛选结果 {len(df)} 条")
             else:
-                self._check_rate_limit()
-                _LOGGER.debug(f"[{self.name}] 调用 concept API 查询概念板块")
-                concepts = self._api.concept()
-                if concepts is None or concepts.empty:
-                    _LOGGER.warning(f"[{self.name}] concept API 返回空结果")
-                    return None
+                df = self._fetch_concept_cons(board_name)
 
-                matched = concepts[concepts['name'].str.contains(board_name, na=False)]
-                if matched.empty:
-                    _LOGGER.debug(f"[{self.name}] 未找到匹配的概念板块: {board_name}")
-                    return None
-
-                concept_code = matched.iloc[0]['code']
-                _LOGGER.debug(f"[{self.name}] 概念板块 '{board_name}' 对应代码: {concept_code}, 调用 concept_detail API")
-                df = self._api.concept_detail(id=concept_code)
-                _LOGGER.debug(f"[{self.name}] concept_detail 返回 {len(df) if df is not None and not df.empty else 0} 条记录")
-
-            if df is None or df.empty:
+            if df is None:
+                _LOGGER.debug(f"[{self.name}] 板块成分股查询结果为空: {board_name}")
+                return None
+            if df.empty:
+                if df.attrs.get("empty_reason"):
+                    return df
                 _LOGGER.debug(f"[{self.name}] 板块成分股查询结果为空: {board_name}")
                 return None
 
@@ -461,13 +625,18 @@ class TushareFetcher(BaseFetcher):
             _LOGGER.debug(f"[{self.name}] 成功获取{board_type}板块成分股: {board_name}, 共 {len(df)} 条")
             return df
         except Exception as e:
-            self._raise_rate_limit_error(e, f"获取{board_type}板块成分股")
+            if self._note_rate_limit(e, f"获取{board_type}板块成分股", api=api_name):
+                return self._quota_empty(api_name)
             _LOGGER.warning(f"[{self.name}] 获取{board_type}板块成分股失败: {e}")
             return None
 
     def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
         """获取实时行情"""
         if not self._available or self._api is None:
+            return None
+        if not self._quota_available("realtime_quote"):
+            # 行情返回标量对象、无法挂 attrs：原因记在实例上，路由回退记 EMPTY 时读取。
+            self._last_empty_reason = self._quota_block_reason("realtime_quote") or ""
             return None
 
         try:
@@ -514,7 +683,8 @@ class TushareFetcher(BaseFetcher):
 
             return quote
         except Exception as e:
-            self._raise_rate_limit_error(e, "获取实时行情")
+            if self._note_rate_limit(e, "获取实时行情", api="realtime_quote"):
+                return None
             _LOGGER.warning(f"[{self.name}] 获取实时行情失败: {e}")
             return None
 
@@ -528,6 +698,8 @@ class TushareFetcher(BaseFetcher):
         """获取分红历史"""
         if not self._available or self._api is None:
             return None
+        if not self._quota_available("dividend"):
+            return self._quota_empty("dividend")
 
         try:
             self._check_rate_limit()
@@ -548,7 +720,8 @@ class TushareFetcher(BaseFetcher):
         except NETWORK_EXCEPTIONS:
             raise
         except Exception as e:
-            self._raise_rate_limit_error(e, "获取分红历史")
+            if self._note_rate_limit(e, "获取分红历史", api="dividend"):
+                return self._quota_empty("dividend")
             _LOGGER.warning(f"[{self.name}] 获取分红历史失败: {e}")
             raise DataFetchError(f"获取数据失败: {e}")
 
@@ -564,6 +737,8 @@ class TushareFetcher(BaseFetcher):
             return None
         if not symbol:
             return None
+        if not self._quota_available("fund_holder"):
+            return self._quota_empty("fund_holder")
 
         try:
             self._check_rate_limit()
@@ -574,7 +749,8 @@ class TushareFetcher(BaseFetcher):
         except NETWORK_EXCEPTIONS:
             raise
         except Exception as e:
-            self._raise_rate_limit_error(e, "获取基金持仓")
+            if self._note_rate_limit(e, "获取基金持仓", api="fund_holder"):
+                return self._quota_empty("fund_holder")
             _LOGGER.warning(f"[{self.name}] 获取基金持仓失败: {e}")
             raise DataFetchError(f"获取数据失败: {e}")
 
@@ -588,6 +764,9 @@ class TushareFetcher(BaseFetcher):
         """获取十大股东"""
         if not self._available or self._api is None:
             return None
+        api_name = "top10_floatholders" if holder_type == "circulate" else "top10_holders"
+        if not self._quota_available(api_name):
+            return self._quota_empty(api_name)
 
         try:
             self._check_rate_limit()
@@ -601,6 +780,7 @@ class TushareFetcher(BaseFetcher):
         except NETWORK_EXCEPTIONS:
             raise
         except Exception as e:
-            self._raise_rate_limit_error(e, "获取十大股东")
+            if self._note_rate_limit(e, "获取十大股东", api=api_name):
+                return self._quota_empty(api_name)
             _LOGGER.warning(f"[{self.name}] 获取十大股东失败: {e}")
             raise DataFetchError(f"获取数据失败: {e}")

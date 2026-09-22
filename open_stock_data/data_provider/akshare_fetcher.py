@@ -5,6 +5,7 @@ Akshare 数据获取器
 
 import logging
 import random
+import threading
 import time
 from datetime import datetime
 from typing import Optional, Dict, List, Tuple, Callable, Any
@@ -15,6 +16,10 @@ import requests
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from .base import BaseFetcher, DataFetchError, NETWORK_EXCEPTIONS
+from .boards import (
+    BOARD_TYPE_INDUSTRY,
+    normalize_belong_board,
+)
 from .types import (
     UnifiedRealtimeQuote,
     ChipDistribution,
@@ -23,8 +28,13 @@ from .types import (
     safe_int,
 )
 from .stock_code import is_etf_code, is_hk_code, normalize_hk_code
+from ..cache import CacheStore
 
 _LOGGER = logging.getLogger(__name__)
+
+# 交易所融资融券全表：一次下载几百 KB、耗时数十秒，同一交易日内对所有股票复用
+_MARGIN_TABLE_CACHE_NAMESPACE = "akshare_margin"
+_MARGIN_TABLE_TTL_SECONDS = 6 * 3600
 
 # Sina / Tencent direct API endpoints for single-stock realtime quotes
 SINA_REALTIME_ENDPOINT = "hq.sinajs.cn/list"
@@ -57,45 +67,9 @@ class AkshareFetcher(BaseFetcher):
 
     name = "AkshareFetcher"
     priority = 4  # 请求优先级
-    backend_group = "eastmoney"
-    _BACKEND_FAILURE_SCOPE_MAP = {
-        "get_realtime_quote": "eastmoney:push2:realtime_quotes",
-        "get_batch_realtime_quotes": "eastmoney:push2:realtime_quotes",
-        "get_bid_ask": "eastmoney:push2:bid_ask",
-        "get_chip_distribution": "eastmoney:cyq:chip_distribution",
-        "get_fund_flow": "eastmoney:https:push2his:fund_flow",
-        "get_belong_board": "eastmoney:push2:sector_spot",
-        "get_billboard": "sina:billboard",
-        "get_margin_ratio": "pingan:margin_ratio",
-        "get_industry_pe": "cninfo:industry_pe",
-        "get_dividend_history": "eastmoney:dividend_history",
-        "get_fund_holder": "eastmoney:fund_holder",
-        "get_top10_holders": "eastmoney:top10_holders",
-        "get_earnings_forecast": "eastmoney:datacenter:yjyg",
-        "get_earnings_report": "eastmoney:datacenter:yjbb",
-        "get_earnings_express": "eastmoney:datacenter:yjkb",
-        "get_dividend_plan": "eastmoney:datacenter:fhps",
-        "get_dividend_cninfo": "cninfo:dividend",
-        "get_cctv_news": "cctv:news",
-    }
 
     def __init__(self):
         super().__init__()
-
-    def get_backend_failure_scope(self, method_name: str, *args, **kwargs) -> Optional[str]:
-        if method_name == "get_board_cons":
-            board_type = kwargs.get("board_type") if "board_type" in kwargs else (args[1] if len(args) > 1 else "industry")
-            return f"eastmoney:push2:board_cons:{board_type}"
-        if method_name == "get_margin_detail":
-            market = kwargs.get("market") if "market" in kwargs else (args[1] if len(args) > 1 else "sh")
-            return f"exchange:margin_detail:{market}"
-        if method_name == "get_a_stock_spot":
-            return "eastmoney:push2:realtime_quotes"
-        scope = self._BACKEND_FAILURE_SCOPE_MAP.get(method_name)
-        if scope:
-            return scope
-        return super().get_backend_failure_scope(method_name, *args, **kwargs)
-
 
     @staticmethod
     def _normalize_mainland_code(value: str) -> str:
@@ -506,13 +480,27 @@ class AkshareFetcher(BaseFetcher):
                         (self._get_stock_realtime_quote_sina, "新浪"),
                     ]
 
+                # 东财 / 腾讯 / 新浪是三个互不相关的后端：某一个网络异常只跳过它自己，
+                # 继续回退，全部都是网络异常时才向上抛（让路由记为后端不可达）。
+                last_network_error: Optional[BaseException] = None
+                network_failures = 0
                 for fetch_fn, source_name in methods:
-                    quote = fetch_fn(stock_code)
+                    try:
+                        quote = fetch_fn(stock_code)
+                    except NETWORK_EXCEPTIONS as exc:
+                        last_network_error = exc
+                        network_failures += 1
+                        _LOGGER.debug(
+                            f"[{self.name}] {source_name} 实时行情网络异常，继续回退: {stock_code}: {exc}"
+                        )
+                        continue
                     if quote is not None and quote.has_basic_data():
                         return quote
                     _LOGGER.debug(
                         f"[{self.name}] {source_name} 实时行情为空或缺少基础字段，继续回退: {stock_code}"
                     )
+                if last_network_error is not None and network_failures == len(methods):
+                    raise last_network_error
                 return None
 
         except NETWORK_EXCEPTIONS:
@@ -977,31 +965,35 @@ class AkshareFetcher(BaseFetcher):
             return None
 
     def get_belong_board(self, stock_code: str) -> Optional[pd.DataFrame]:
-        """获取所属板块（优先个股板块接口，失败后回退行业板块列表）"""
+        """获取所属板块：东财个股信息接口给出所属行业，输出统一 schema（见 boards.py）。
+
+        以前失败时会退回“行业板块涨跌榜前后 15 名”——那是全市场数据，与该股无关，
+        会被下游当成该股的板块使用，已移除。
+        """
         try:
-            self.random_sleep(1.0, 2.0)
+            self.random_sleep(0.5, 1.0)
+            code = self._normalize_mainland_code(stock_code)
+            if not code:
+                return None
 
-            try:
-                sector_df = self._call_ak_func_with_symbol_fallback(
-                    ak.stock_sector_spot,
-                    stock_code,
-                    include_no_arg=True,
-                    allow_unfiltered_no_arg=False,
-                )
-                if sector_df is not None and not sector_df.empty:
-                    return sector_df
-            except NETWORK_EXCEPTIONS:
-                raise
-            except Exception as exc:
-                _LOGGER.debug(f"[{self.name}] stock_sector_spot 获取所属板块失败: {exc}")
+            info = ak.stock_individual_info_em(symbol=code)
+            if info is None or info.empty or not {"item", "value"} <= set(info.columns):
+                return None
 
-            industry_boards = ak.stock_board_industry_name_em()
-            if industry_boards is not None and not industry_boards.empty:
-                industry_boards.sort_values("涨跌幅", ascending=False, inplace=True)
-                top_bottom = pd.concat([industry_boards.head(15), industry_boards.tail(15)])
-                return top_bottom
+            fields = dict(zip(info["item"].astype(str), info["value"]))
+            industry = fields.get("行业")
+            if industry is None or str(industry).strip() in ("", "-", "nan", "None"):
+                _LOGGER.debug(f"[{self.name}] 个股信息未包含行业: {stock_code}")
+                return None
 
-            return None
+            df = pd.DataFrame([{
+                "板块名称": str(industry).strip(),
+                "板块代码": None,
+                "板块类型": BOARD_TYPE_INDUSTRY,
+                "股票代码": str(fields.get("股票代码") or code),
+                "股票名称": fields.get("股票简称"),
+            }])
+            return normalize_belong_board(df)
         except NETWORK_EXCEPTIONS:
             raise
         except Exception as e:
@@ -1016,6 +1008,8 @@ class AkshareFetcher(BaseFetcher):
     )
     def get_board_cons(self, board_name: str, board_type: str = "industry") -> Optional[pd.DataFrame]:
         """获取板块成分股（先查找精确板块名再获取成分股，带重试机制）"""
+        if not board_name or not str(board_name).strip():
+            return None
         self.random_sleep(0.3, 0.8)
 
         try:
@@ -1037,11 +1031,11 @@ class AkshareFetcher(BaseFetcher):
             _LOGGER.warning(f"[{self.name}] 获取板块列表为空")
             return None
 
-        # 2. 精确匹配或模糊匹配板块名
+        # 2. 精确匹配或模糊匹配板块名（字面匹配：板块名含 (、+ 等正则元字符时不能按正则走）
         exact_match = boards[boards["板块名称"] == board_name]
         if exact_match.empty:
             # 尝试模糊匹配
-            fuzzy_match = boards[boards["板块名称"].str.contains(board_name, na=False)]
+            fuzzy_match = boards[boards["板块名称"].str.contains(board_name, na=False, regex=False)]
             if fuzzy_match.empty:
                 _LOGGER.warning(f"[{self.name}] 未找到板块: {board_name}")
                 return None
@@ -1087,9 +1081,28 @@ class AkshareFetcher(BaseFetcher):
         retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
         reraise=True
     )
+    def _load_margin_detail_table(self, market: str) -> Optional[pd.DataFrame]:
+        """交易所融资融券全表（按交易所缓存 6 小时）：一次下载，后续所有股票直接筛选。"""
+        market = "sz" if str(market).lower() == "sz" else "sh"
+        store = CacheStore.get_store(_MARGIN_TABLE_CACHE_NAMESPACE)
+        key = f"margin_detail_table:{market}"
+        cached = store.get(key)
+        if isinstance(cached, pd.DataFrame) and not cached.empty:
+            _LOGGER.debug(f"[{self.name}] 命中融资融券全表缓存: market={market}, rows={len(cached)}")
+            return cached
+
+        self.random_sleep(1.0, 2.0)
+        if market == "sh":
+            df = ak.stock_margin_detail_sse(date="")
+        else:
+            df = ak.stock_margin_detail_szse(date="")
+        if df is not None and not df.empty:
+            store.set(key, df, expire=_MARGIN_TABLE_TTL_SECONDS)
+        return df
+
     def get_margin_detail(self, stock_code: str, market: str = "sh") -> Optional[pd.DataFrame]:
         """
-        获取融资融券明细（带重试机制）
+        获取融资融券明细（交易所全表按交易所缓存后按股票筛选）
 
         Args:
             stock_code: 股票代码
@@ -1098,21 +1111,15 @@ class AkshareFetcher(BaseFetcher):
         Returns:
             DataFrame 或 None
         """
-        self.random_sleep(1.0, 2.0)
-
+        market = "sz" if str(market).lower() == "sz" else "sh"
         try:
-            if market == "sh":
-                df = ak.stock_margin_detail_sse(date="")
-                if df is not None and not df.empty and stock_code:
-                    if "标的证券代码" in df.columns:
-                        df = df[df["标的证券代码"].astype(str).str.contains(stock_code)]
+            df = self._load_margin_detail_table(market)
+            if df is None or df.empty or not stock_code:
                 return df
-            else:
-                df = ak.stock_margin_detail_szse(date="")
-                if df is not None and not df.empty and stock_code:
-                    if "证券代码" in df.columns:
-                        df = df[df["证券代码"].astype(str).str.contains(stock_code)]
-                return df
+            code_col = "标的证券代码" if market == "sh" else "证券代码"
+            if code_col in df.columns:
+                df = df[df[code_col].astype(str).str.contains(stock_code, regex=False)]
+            return df
         except TypeError as e:
             # akshare深交所接口bug: Expected file path name or file-like object, got <class 'bytes'> type
             _LOGGER.warning(f"[{self.name}] akshare深交所融资融券接口异常（可能是库版本bug）: {e}")
@@ -1125,7 +1132,7 @@ class AkshareFetcher(BaseFetcher):
             df = ak.stock_margin_ratio_pa()
             if df is not None and not df.empty:
                 if "证券代码" in df.columns:
-                    filtered = df[df["证券代码"].astype(str).str.contains(stock_code)]
+                    filtered = df[df["证券代码"].astype(str).str.contains(stock_code, regex=False)]
                     if not filtered.empty:
                         return filtered
             return None
@@ -1246,6 +1253,30 @@ class AkshareFetcher(BaseFetcher):
         ),
     }
     _EM_SPOT_PAGE_SIZE = 100
+
+    # 共享 Session 复用 keep-alive 连接（仅用于 push2 接口）
+    _push2_session: Optional[requests.Session] = None
+    _push2_session_lock = threading.Lock()
+
+    @classmethod
+    def _get_push2_session(cls) -> requests.Session:
+        """获取 push2 接口专用共享 Session：复用 keep-alive 连接。"""
+        if cls._push2_session is None:
+            with cls._push2_session_lock:
+                if cls._push2_session is None:
+                    session = requests.Session()
+                    adapter = requests.adapters.HTTPAdapter(
+                        pool_connections=1, pool_maxsize=1, max_retries=0,
+                    )
+                    session.mount("https://", adapter)
+                    session.headers["User-Agent"] = (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+                    )
+                    session.headers["Connection"] = "keep-alive"
+                    cls._push2_session = session
+        return cls._push2_session
+    _EM_SPOT_PAGE_SIZE = 100
     _EM_SPOT_COLUMNS = [
         "序号", "_", "最新价", "涨跌幅", "涨跌额", "成交量", "成交额",
         "振幅", "换手率", "市盈率-动态", "量比", "5分钟涨跌", "代码", "_",
@@ -1273,11 +1304,11 @@ class AkshareFetcher(BaseFetcher):
         last_exc = None
         for attempt in range(max_retries):
             try:
-                resp = requests.get(
+                # 共享 Session 复用 keep-alive 连接
+                resp = self._get_push2_session().get(
                     self._EM_SPOT_URL,
                     params=params,
                     timeout=timeout,
-                    headers={"User-Agent": self.get_random_user_agent()},
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -1342,12 +1373,14 @@ class AkshareFetcher(BaseFetcher):
             else:
                 failed_pages.append(page)
 
-        # 失败页重试：最多 4 轮，间隔递增
+        # 失败页重试：最多 6 轮，间隔递增
         retry_delays = [
-            (1.0, 3.0),   # 第 1 轮
-            (2.0, 5.0),   # 第 2 轮
-            (3.0, 8.0),   # 第 3 轮
-            (5.0, 10.0),  # 第 4 轮
+            (1.0, 6.0),   # 第 1 轮
+            (6.0, 12.0),   # 第 2 轮
+            (12.0, 18.0),   # 第 3 轮
+            (18.0, 24.0),  # 第 4 轮
+            (24.0, 30.0), # 第 5 轮：长冷却，缓解服务端限流
+            (30.0, 60.0), # 第 6 轮：更深冷却，应对连接池耗尽
         ]
         for round_idx, delay_range in enumerate(retry_delays, 1):
             if not failed_pages:

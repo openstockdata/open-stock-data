@@ -16,6 +16,7 @@ import pandas as pd
 
 from .exceptions import AllSourcesFailed, BatchIncomplete
 from .data_provider.base import BaseFetcher
+from .data_provider.boards import normalize_belong_board
 from .data_provider.columns import to_english_columns
 from .data_provider.context import ProviderContext
 from .data_provider.contracts import (
@@ -228,9 +229,17 @@ class OpenStockDataClient:
         )
 
     def belong_board(self, symbol: str) -> FetchResult[pd.DataFrame]:
-        return self._executor.execute(
+        """所属板块，统一 schema：板块名称 / 板块代码 / 板块类型 / 股票代码 / 股票名称 + 各源附加列。
+
+        各 provider 已在源头归一；这里再兜底一次，覆盖修复前写入本地存储/缓存的旧格式帧。
+        """
+        result = self._executor.execute(
             RouteRequest(Operation.BELONG_BOARD, None, args=(symbol,), cache_key=symbol)
         )
+        normalized = normalize_belong_board(result.data)
+        if normalized is not result.data:
+            result = replace(result, data=normalized)
+        return result
 
     def board_cons(self, board_name: str, board_type: str = "industry") -> FetchResult[pd.DataFrame]:
         return self._executor.execute(

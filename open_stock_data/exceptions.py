@@ -96,11 +96,29 @@ class AllSourcesFailed(DataFetchError):
         self.operation = operation
         self.attempts = tuple(attempts)
         self.request = dict(request or {})
-        sources = ", ".join(getattr(item, "source", "unknown") for item in attempts)
+        sources = ", ".join(self._describe_attempt(item) for item in self.attempts)
         detail = f"所有数据源失败: operation={operation}"
         if sources:
             detail += f", sources={sources}"
+        else:
+            detail += ", 未发起任何尝试"
+        reason = self.request.get("reason")
+        if reason:
+            detail += f" ({reason})"
         super().__init__(detail)
+
+    @staticmethod
+    def _describe_attempt(item: Any) -> str:
+        """`源名(结果)`；被跳过的附带原因，例如 `EfinanceFetcher(skipped:circuit_open)`。"""
+        source = getattr(item, "source", "unknown")
+        outcome = getattr(item, "outcome", None)
+        if outcome is None:
+            return str(source)
+        outcome_value = getattr(outcome, "value", outcome)
+        reason = getattr(item, "reason", None)
+        if outcome_value == "skipped" and reason:
+            return f"{source}({outcome_value}:{reason})"
+        return f"{source}({outcome_value})"
 
 
 class BatchIncomplete(DataFetchError):

@@ -1,8 +1,6 @@
 """本地优先 provider + persist 回写的端到端测试（RouteExecutor 级）。"""
 import pandas as pd
-import pytest
 
-from open_stock_data.data_provider.circuit_breaker import get_circuit_breaker
 from open_stock_data.data_provider.context import ProviderContext
 from open_stock_data.data_provider.contracts import (
     AttemptOutcome,
@@ -15,17 +13,9 @@ from open_stock_data.data_provider.local_store import LocalStore, LocalStoreFetc
 from open_stock_data.data_provider.routing import RouteExecutor, RouteRegistry
 
 
-@pytest.fixture(autouse=True)
-def reset_breaker():
-    get_circuit_breaker("dividend").reset()
-    yield
-    get_circuit_breaker("dividend").reset()
-
-
 class NetFetcher:
     name = "TushareFetcher"
     priority = 0
-    backend_group = ""
 
     def __init__(self, frame):
         self._frame = frame
@@ -39,9 +29,6 @@ class NetFetcher:
     def metadata(self):
         from open_stock_data.data_provider.plugin import ProviderMetadata
         return ProviderMetadata(name="TushareFetcher", priority=0, tags=())
-
-    def get_backend_failure_scope(self, method_name, *a, **k):
-        return None
 
     def execute(self, method_name: str, *args, **kwargs):
         method = getattr(self, method_name)
@@ -63,7 +50,6 @@ def _executor(store):
         None,
         ("LocalStoreFetcher", "TushareFetcher"),
         "get_dividend_history",
-        "dividend",
         persist=persist,
     )
     net = NetFetcher(pd.DataFrame([{"公告日期": "2026-01-01", "派息": 3.0}]))

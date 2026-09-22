@@ -315,7 +315,7 @@ def stock_block_trade(
             if df is not None and not df.empty:
                 code_col = next((c for c in df.columns if "代码" in c), None)
                 if code_col:
-                    df = df[df[code_col].astype(str).str.contains(symbol)]
+                    df = df[df[code_col].astype(str).str.contains(symbol, regex=False)]
                 if not df.empty:
                     lines = [f"# {symbol} 大宗交易", f"# 数据来源: akshare (东方财富)"]
                     lines.append(df.head(limit).to_csv(index=False, float_format="%.2f").strip())

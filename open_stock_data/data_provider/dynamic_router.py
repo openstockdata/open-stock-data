@@ -13,10 +13,8 @@ from typing import Any, Optional
 from .context import ProviderContext
 from .contracts import RouteSpec, RouteRequest, FetchResult, FetchAttempt, AttemptOutcome, CachePolicy, ResultValidator, PersistHook, utc_now
 from .plugin import ProviderHealthEvent
-from .circuit_breaker import get_circuit_breaker
 from ..cache import CacheStore, _CacheEntry
 from ..exceptions import AllSourcesFailed, RateLimitError
-from .base import _is_network_error
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,19 +24,23 @@ class DynamicRouter:
 
     核心逻辑：
     1. 从 ProviderContext.get_by_priority(operation) 获取排序后的 provider 列表
-    2. 按顺序尝试，熔断的跳过
-    3. 每次尝试后发射 ProviderHealthEvent
-    4. 失败触发 context.emit()，自动重算优先级
+    2. 按顺序尝试；已熔断（OPEN）的跳过，HALF_OPEN 允许探测
+    3. 每次尝试后发射 ProviderHealthEvent（唯一健康事实来源）
+    4. 失败触发 context.emit()，连续失败达阈值自动熔断
     """
 
-    _CACHE_SCHEMA = "v1"
+    # 路由缓存键 schema：belong_board 统一 schema 上线后旧格式帧（股票代码/行业列，
+    # 无 板块名称）仍在 7 天 TTL 内，bump 到 v2 使其整体失效。本地长期存储的旧事实
+    # 由 client.belong_board 读取时归一化兜底。
+    _CACHE_SCHEMA = "v2"
+    _RATE_LIMIT_DEFAULT_COOLDOWN = 300.0
 
     def __init__(self, context: ProviderContext):
         self._context = context
 
     def resolve(self, route: RouteSpec) -> list:
         """返回按健康分排序的 provider 列表。
-        
+
         如果 RouteSpec 定义了 providers，则仅从这些 provider 中选择。
         """
         all_providers = self._context.get_by_priority(route.operation)
@@ -50,38 +52,21 @@ class DynamicRouter:
     def execute(self, request: RouteRequest, route: RouteSpec) -> FetchResult:
         """执行路由：使用动态 provider 顺序。"""
         providers = self.resolve(route)
-        cache_ttl = route.cache_policy.current_ttl() if route.cache_policy else 0.0
-        cache_key = self._full_cache_key(route, request)
-        cached, cache_age = self._read_cache(cache_key)
-
-        if cached is not None and cache_age <= cache_ttl:
-            return FetchResult(
-                data=cached.data,
-                source=cached.source,
-                fetched_at=cached.fetched_at,
-                from_cache=True,
-            )
+        fresh = self.read_fresh_cache(request, route)
+        if fresh is not None:
+            return fresh
+        # 仅供失败时的 stale-on-error 降级（新鲜命中已在上面返回）
+        cached, cache_age = self._read_cache(self._full_cache_key(route, request))
 
         attempts: list[FetchAttempt] = []
-        failed_backend_scopes: set[str] = set()
-        circuit_breaker = get_circuit_breaker(route.circuit_breaker)
 
         for provider in providers:
             provider_name = provider.metadata.name
             if not provider.is_available:
                 attempts.append(FetchAttempt(provider_name, AttemptOutcome.SKIPPED, reason="unavailable"))
                 continue
-            if not circuit_breaker.is_available(provider_name):
+            if self._context.circuit_state(provider_name) == "OPEN":
                 attempts.append(FetchAttempt(provider_name, AttemptOutcome.SKIPPED, reason="circuit_open"))
-                continue
-
-            backend_scope = self._get_backend_scope(provider, route.method_name, *request.args, **dict(request.kwargs))
-            if (
-                route.skip_shared_backend_after_network_error
-                and backend_scope
-                and backend_scope in failed_backend_scopes
-            ):
-                attempts.append(FetchAttempt(provider_name, AttemptOutcome.SKIPPED, reason=f"backend_failed:{backend_scope}"))
                 continue
 
             started = time.monotonic()
@@ -90,16 +75,16 @@ class DynamicRouter:
                 latency_ms = (time.monotonic() - started) * 1000
 
                 if self._is_empty(data) and route.empty_is_failure:
-                    attempts.append(FetchAttempt(provider_name, AttemptOutcome.EMPTY, latency_ms, "empty_result"))
-                    self._emit_health(provider_name, False, latency_ms)
+                    # 空结果只说明该源没有这份数据（本地未命中、板块不存在、配额冷却…），
+                    # 不是故障：记 EMPTY 并回退到下一源，不计入健康分，也不触发熔断。
+                    # 配额冷却的原因经 attrs / fetcher 实例透出，记入 reason 供 AllSourcesFailed 排查。
+                    attempts.append(FetchAttempt(provider_name, AttemptOutcome.EMPTY, latency_ms, self._empty_reason(data, provider)))
                     continue
                 if route.validator is not None and not route.validator(data):
-                    circuit_breaker.record_failure(provider_name, "invalid_result")
                     attempts.append(FetchAttempt(provider_name, AttemptOutcome.INVALID, latency_ms, "invalid_result"))
                     self._emit_health(provider_name, False, latency_ms)
                     continue
 
-                circuit_breaker.record_success(provider_name)
                 attempts.append(FetchAttempt(provider_name, AttemptOutcome.SUCCESS, latency_ms))
                 self._emit_health(provider_name, True, latency_ms)
 
@@ -109,21 +94,19 @@ class DynamicRouter:
                     fetched_at=utc_now(),
                     attempts=tuple(attempts),
                 )
-                self._write_cache(cache_key, route, result)
+                self.store_result(request, route, result)
                 self._run_persist(route, data, request, provider_name)
                 return result
 
             except RateLimitError as exc:
                 latency_ms = (time.monotonic() - started) * 1000
-                circuit_breaker.force_open(provider_name, exc.retry_after or 300, str(exc))
+                cooldown = exc.retry_after or self._RATE_LIMIT_DEFAULT_COOLDOWN
+                self._context.block_provider(provider_name, cooldown, str(exc))
                 attempts.append(FetchAttempt(provider_name, AttemptOutcome.RATE_LIMITED, latency_ms, str(exc), type(exc).__name__))
                 self._emit_health(provider_name, False, latency_ms)
 
             except Exception as exc:
                 latency_ms = (time.monotonic() - started) * 1000
-                circuit_breaker.record_failure(provider_name, str(exc))
-                if _is_network_error(exc) and backend_scope:
-                    failed_backend_scopes.add(backend_scope)
                 attempts.append(FetchAttempt(provider_name, AttemptOutcome.ERROR, latency_ms, str(exc), type(exc).__name__))
                 self._emit_health(provider_name, False, latency_ms)
 
@@ -142,20 +125,68 @@ class DynamicRouter:
                 attempts=tuple(attempts),
             )
 
+        request_info: dict[str, Any] = {"market": request.market.value if request.market else None}
+        if not providers:
+            # 候选为空通常是路由里的 provider 名称与注册名不一致，或 provider 初始化失败；
+            # 写明原因，避免只看到一条空的 "sources=" 无从排查。
+            request_info["reason"] = (
+                f"无可用候选数据源: route.providers={list(route.providers)}, "
+                f"registered={self._context.provider_names}"
+            )
+            _LOGGER.warning("[router] %s %s", route.operation.value, request_info["reason"])
         raise AllSourcesFailed(
             operation=request.operation.value,
             attempts=attempts,
-            request={"market": request.market.value if request.market else None},
+            request=request_info,
         )
 
     def _emit_health(self, source: str, success: bool, latency_ms: float) -> None:
         """发射健康事件。"""
+        self.report_health(source, success, latency_ms)
+
+    def circuit_state(self, name: str) -> str:
+        """provider 当前熔断状态（供 RouteExecutor 批量路径复用同一判定）。"""
+        return self._context.circuit_state(name)
+
+    def report_health(self, source: str, success: bool, latency_ms: float) -> None:
+        """发射健康事件（供 RouteExecutor 批量路径上报批量调用的成败）。"""
         self._context.emit(ProviderHealthEvent(source=source, success=success, latency_ms=latency_ms))
 
-    def _get_backend_scope(self, provider, method_name: str, *args, **kwargs) -> Optional[str]:
-        if hasattr(provider, 'backend_group') and provider.backend_group:
-            return f"{provider.backend_group}:{method_name}"
+    def read_fresh_cache(self, request: RouteRequest, route: RouteSpec) -> Optional[FetchResult]:
+        """TTL 内的路由缓存命中（供单查与批量前置过滤复用）。"""
+        if route.cache_policy is None or request.cache_key is None:
+            return None
+        cached, cache_age = self._read_cache(self._full_cache_key(route, request))
+        if cached is not None and cache_age <= route.cache_policy.current_ttl():
+            return FetchResult(
+                data=cached.data,
+                source=cached.source,
+                fetched_at=cached.fetched_at,
+                from_cache=True,
+            )
         return None
+
+    def store_result(self, request: RouteRequest, route: RouteSpec, result: FetchResult) -> None:
+        """写入路由缓存（供批量覆盖项回填，与单查成功路径一致）。"""
+        self._write_cache(self._full_cache_key(route, request), route, result)
+
+    @staticmethod
+    def _empty_reason(data, provider=None) -> str:
+        """从空结果上提取可排查原因（如 tushare 配额冷却），无则用默认值。
+
+        双通道：DataFrame 的 attrs["empty_reason"]（主）；
+        标量返回（实时行情等无法挂 attrs）读 fetcher 的 _last_empty_reason（备）。
+        """
+        attrs = getattr(data, "attrs", None)
+        if isinstance(attrs, dict):
+            reason = attrs.get("empty_reason") or attrs.get("quota_reason")
+            if reason:
+                return str(reason)
+        if provider is not None:
+            fallback = getattr(provider, "_last_empty_reason", "") or ""
+            if fallback:
+                return str(fallback)
+        return "empty_result"
 
     @staticmethod
     def _is_empty(value) -> bool:

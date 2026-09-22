@@ -70,11 +70,26 @@ class TestDataProvider:
         assert "providers" in status
         assert len(status["providers"]) > 0
 
-    def test_circuit_breaker_types(self):
-        from open_stock_data.data_provider import get_circuit_breaker
+    def test_provider_health_is_unified_single_system(self):
+        """统一单层健康体系：ProviderHealth 是唯一事实来源（阈值/冷却是唯一一套）。"""
+        from open_stock_data.data_provider.plugin import (
+            ProviderHealth,
+            DEFAULT_COOLDOWN_SECONDS,
+            DEFAULT_FAILURE_THRESHOLD,
+        )
+        from open_stock_data.data_provider.context import ProviderContext
 
-        for name in ("daily", "realtime", "chip", "fund_flow", "board", "billboard"):
-            assert get_circuit_breaker(name) is not None
+        assert DEFAULT_FAILURE_THRESHOLD >= 1
+        assert DEFAULT_COOLDOWN_SECONDS >= 0
+
+        health = ProviderHealth()
+        assert health.circuit_state == "CLOSED"
+        for _ in range(DEFAULT_FAILURE_THRESHOLD):
+            health.update_failure(10)
+        assert health.circuit_state == "OPEN"
+
+        ctx = ProviderContext()
+        assert ctx.circuit_state("ghost") == "CLOSED"
 
 
 @pytest.mark.network

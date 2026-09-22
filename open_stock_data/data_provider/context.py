@@ -18,6 +18,9 @@ from .contracts import Operation
 
 _LOGGER = logging.getLogger(__name__)
 
+# priority 每档折算的分数；健康调整分（ProviderHealth.score）以此为尺度设计，见 plugin.py。
+PRIORITY_WEIGHT = 1.0
+
 
 class ProviderContext:
     """所有 provider 的共享注册中心 + 事件总线 + 健康指标存储。
@@ -94,27 +97,43 @@ class ProviderContext:
             ]
 
     def get_by_priority(self, operation: Operation) -> list[ProviderPlugin]:
-        """按健康分降序返回可用 provider 列表（DynamicRouter 用）。
+        """按综合分降序返回可用 provider 列表（DynamicRouter 用）。
 
-        排序逻辑：健康分 = success_rate * 100 - avg_latency * 0.1 - failure_count * 5
-        熔断中的 provider 排在最后。
+        综合分 = priority × PRIORITY_WEIGHT + 健康调整分（≤ 0，见 plugin.py）。
+        priority 是主排序键；成功率/延迟只在同优先级之间微调。
+        已熔断（OPEN）的 provider 不在这里过滤——是否跳过由路由执行时统一判定，
+        本方法只负责排序。
         """
         with self._internal_lock:
-            available = [
-                p for p in self._providers.values()
-                if p.is_available and self._health.get(p.metadata.name, ProviderHealth()).circuit_state != "OPEN"
-            ]
             scored = [
-                (self._compute_score(p), p) for p in available
+                (self._compute_score(p), p)
+                for p in self._providers.values()
+                if p.is_available
             ]
             scored.sort(key=lambda x: x[0], reverse=True)
             return [p for _, p in scored]
 
     def _compute_score(self, plugin: ProviderPlugin) -> float:
-        """计算 provider 的综合健康分。"""
+        """计算 provider 的综合分（priority 主导 + 健康调整）。"""
         h = self._health.get(plugin.metadata.name, ProviderHealth())
         priority = self._priority_overrides.get(plugin.metadata.name, plugin.metadata.priority)
-        return h.score + priority * 0.1
+        return priority * PRIORITY_WEIGHT + h.score
+
+    def block_provider(self, name: str, seconds: float, reason: str = "") -> None:
+        """配额冷却/强制熔断：seconds 内该 provider 一律 OPEN（路由跳过）。"""
+        with self._internal_lock:
+            h = self._health.get(name)
+            if h is not None:
+                h.block_for(seconds, reason)
+                _LOGGER.warning(
+                    "[provider_context] %s 强制冷却 %.0fs: %s", name, seconds, reason or "-",
+                )
+
+    def circuit_state(self, name: str) -> str:
+        """provider 当前熔断状态：CLOSED / OPEN / HALF_OPEN。"""
+        with self._internal_lock:
+            h = self._health.get(name)
+        return h.circuit_state if h is not None else "CLOSED"
 
     # -- 事件系统 --
 
@@ -125,10 +144,21 @@ class ProviderContext:
             h = self._health.get(name)
             if h is None:
                 return
+            before = h.circuit_state
             if event.success:
                 h.update_success(event.latency_ms)
             else:
                 h.update_failure(event.latency_ms)
+            after = h.circuit_state
+            failures, cooldown = h.failure_count, h.cooldown_seconds
+
+        if after == "OPEN" and before != "OPEN":
+            _LOGGER.warning(
+                "[provider_context] %s 连续失败 %d 次，熔断跳过（%.0fs 后允许探测）",
+                name, failures, cooldown,
+            )
+        elif after == "CLOSED" and before != "CLOSED":
+            _LOGGER.info("[provider_context] %s 探测成功，恢复正常优先级", name)
 
         # 通知监听者（锁外执行，避免死锁）
         for listener in self._listeners.get(event.__class__.__name__, []):

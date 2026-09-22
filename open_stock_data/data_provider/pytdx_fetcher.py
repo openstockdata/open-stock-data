@@ -78,7 +78,6 @@ class PytdxFetcher(BaseFetcher):
 
     name = "PytdxFetcher"
     priority = 1
-    backend_group = "pytdx"
 
     SECURITY_LIST_PAGE_SIZE = 1000
 

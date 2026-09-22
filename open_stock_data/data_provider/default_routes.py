@@ -27,6 +27,13 @@ def _fund_flow_ttl() -> float:
     return CACHE_TTLS["fund_flow_closed"]
 
 
+def _margin_ttl() -> float:
+    """融资融券为交易所日频数据：盘中 1 小时，收盘后到次日。"""
+    if MarketHoursConfig.is_trading_time(MarketType.A_STOCK):
+        return CACHE_TTLS["margin_trading"]
+    return CACHE_TTLS["margin_closed"]
+
+
 def _daily_policy() -> CachePolicy:
     return CachePolicy(
         ttl_seconds=CACHE_TTLS["daily"],
@@ -58,10 +65,11 @@ def _persist_fact(data, request, source) -> None:
 
 
 def create_default_routes() -> RouteRegistry:
-    # daily_prices: Tickflow → Efinance → Akshare
-    # priority: LocalStore=100(缓存优先) > Tickflow=10 > Efinance=5 > Akshare=1 > Yfinance=3 > Tushare=0
-    # Note: LocalStoreFetcher 不实现 get_daily_data，但通过 LocalStore 缓存层服务
-    # 运行时可通过 client.provider_context.set_priority("TickflowFetcher", 20) 动态调整
+    # providers 元组只是“候选名单”（该路由允许用哪些源）；实际回退顺序由
+    # ProviderContext 按 priority（主键）+ 健康分实时排序，与元组书写顺序无关。
+    # 当前 priority：LocalStore=100 > Tickflow=10 > Tushare/AlphaVantage/Yfinance=9 >
+    # Efinance=5 > Akshare=4 > Baostock=3 > Pytdx=1。运行时可用
+    # client.provider_context.set_priority("TickflowFetcher", 20) 动态调整。
 
     routes = [
         RouteSpec(
@@ -69,7 +77,6 @@ def create_default_routes() -> RouteRegistry:
             StockType.A_STOCK,
             ("TickflowFetcher", "TushareFetcher", "EfinanceFetcher", "AkshareFetcher", "YfinanceFetcher", "BaostockFetcher", "PytdxFetcher"),
             "get_daily_data",
-            "daily",
             _daily_policy(),
         ),
         RouteSpec(
@@ -77,7 +84,6 @@ def create_default_routes() -> RouteRegistry:
             StockType.ETF,
             ("TickflowFetcher", "TushareFetcher", "EfinanceFetcher", "AkshareFetcher", "YfinanceFetcher"),
             "get_daily_data",
-            "daily",
             _daily_policy(),
         ),
         RouteSpec(
@@ -85,15 +91,13 @@ def create_default_routes() -> RouteRegistry:
             StockType.HK,
             ("YfinanceFetcher", "AkshareFetcher"),
             "get_daily_data",
-            "daily",
             _daily_policy(),
         ),
         RouteSpec(
             Operation.DAILY_PRICES,
             StockType.US,
-            ("AlphaVantageFetcher", "YfinanceFetcher"),
+            ("LocalStoreFetcher", "AlphaVantageFetcher", "YfinanceFetcher"),
             "get_daily_data",
-            "daily",
             _daily_policy(),
         ),
         RouteSpec(
@@ -101,7 +105,6 @@ def create_default_routes() -> RouteRegistry:
             StockType.A_STOCK,
             ("TickflowFetcher", "TushareFetcher", "EfinanceFetcher", "AkshareFetcher", "PytdxFetcher"),
             "get_realtime_quote",
-            "realtime",
             CachePolicy(lambda: _realtime_ttl(MarketType.A_STOCK)),
             validator=_quote_is_valid,
             batch_method="get_batch_realtime_quotes",
@@ -111,7 +114,6 @@ def create_default_routes() -> RouteRegistry:
             StockType.ETF,
             ("TickflowFetcher", "AkshareFetcher", "YfinanceFetcher"),
             "get_realtime_quote",
-            "realtime",
             CachePolicy(lambda: _realtime_ttl(MarketType.A_STOCK)),
             validator=_quote_is_valid,
             batch_method="get_batch_realtime_quotes",
@@ -121,7 +123,6 @@ def create_default_routes() -> RouteRegistry:
             StockType.HK,
             ("TickflowFetcher", "AkshareFetcher", "YfinanceFetcher"),
             "get_realtime_quote",
-            "realtime",
             CachePolicy(lambda: _realtime_ttl(MarketType.HK_STOCK)),
             validator=_quote_is_valid,
             batch_method="get_batch_realtime_quotes",
@@ -131,7 +132,6 @@ def create_default_routes() -> RouteRegistry:
             StockType.US,
             ("TickflowFetcher", "YfinanceFetcher"),
             "get_realtime_quote",
-            "realtime",
             CachePolicy(lambda: _realtime_ttl(MarketType.US_STOCK)),
             validator=_quote_is_valid,
             batch_method="get_batch_realtime_quotes",
@@ -139,12 +139,10 @@ def create_default_routes() -> RouteRegistry:
         RouteSpec(
             Operation.A_STOCK_SNAPSHOT,
             StockType.A_STOCK,
-            ("EfinanceFetcher", "AkshareFetcher"),
+            ("AkshareFetcher", "EfinanceFetcher"),
             "get_a_stock_spot",
-            "spot",
             CachePolicy(_snapshot_ttl),
             validator=_snapshot_is_complete,
-            skip_shared_backend_after_network_error=False,
         ),
         # ---- 个股分析 / 资金流 / 板块（A 股，市场无关路由）----
         RouteSpec(
@@ -152,7 +150,6 @@ def create_default_routes() -> RouteRegistry:
             None,
             ("EfinanceFetcher", "TushareFetcher", "AkshareFetcher"),
             "get_fund_flow",
-            "fund_flow",
             CachePolicy(_fund_flow_ttl),
         ),
         RouteSpec(
@@ -160,14 +157,12 @@ def create_default_routes() -> RouteRegistry:
             None,
             ("AkshareFetcher",),
             "get_chip_distribution",
-            "chip",
         ),
         RouteSpec(
             Operation.BELONG_BOARD,
             None,
             ("LocalStoreFetcher", "TushareFetcher", "EfinanceFetcher", "AkshareFetcher", "BaostockFetcher"),
             "get_belong_board",
-            "board",
             CachePolicy(CACHE_TTLS["belong_board"]),
             persist=_persist_fact,
         ),
@@ -176,7 +171,6 @@ def create_default_routes() -> RouteRegistry:
             None,
             ("LocalStoreFetcher", "TushareFetcher", "AkshareFetcher"),
             "get_board_cons",
-            "board",
             persist=_persist_fact,
         ),
         RouteSpec(
@@ -184,7 +178,6 @@ def create_default_routes() -> RouteRegistry:
             None,
             ("TushareFetcher", "EfinanceFetcher", "AkshareFetcher"),
             "get_billboard",
-            "billboard",
         ),
         # ---- 估值 / 财务 ----
         RouteSpec(
@@ -192,7 +185,6 @@ def create_default_routes() -> RouteRegistry:
             None,
             ("LocalStoreFetcher", "AkshareFetcher"),
             "get_industry_pe",
-            "industry_pe",
             persist=_persist_fact,
         ),
         RouteSpec(
@@ -200,7 +192,6 @@ def create_default_routes() -> RouteRegistry:
             None,
             ("LocalStoreFetcher", "TushareFetcher", "AkshareFetcher"),
             "get_dividend_history",
-            "dividend",
             persist=_persist_fact,
         ),
         RouteSpec(
@@ -208,7 +199,6 @@ def create_default_routes() -> RouteRegistry:
             None,
             ("LocalStoreFetcher", "TushareFetcher", "AkshareFetcher"),
             "get_fund_holder",
-            "fund_holder",
             persist=_persist_fact,
         ),
         # ---- 股东 ----
@@ -217,7 +207,6 @@ def create_default_routes() -> RouteRegistry:
             None,
             ("LocalStoreFetcher", "TushareFetcher", "AkshareFetcher"),
             "get_top10_holders",
-            "top10_holders",
             persist=_persist_fact,
         ),
         # ---- 融资融券（个股明细，比例作末轮兜底）----
@@ -226,83 +215,75 @@ def create_default_routes() -> RouteRegistry:
             None,
             ("AkshareFetcher",),
             "get_margin_detail",
-            "margin",
+            CachePolicy(_margin_ttl),
         ),
         RouteSpec(
             Operation.MARGIN_RATIO,
             None,
             ("AkshareFetcher",),
             "get_margin_ratio",
-            "margin",
+            CachePolicy(_margin_ttl),
         ),
         # ---- 美股基本面（AlphaVantage > YFinance；news/tech 仅 AlphaVantage）----
         RouteSpec(
             Operation.US_OVERVIEW,
             StockType.US,
-            ("LocalStoreFetcher", "AlphaVantage", "YfinanceFetcher"),
+            ("LocalStoreFetcher", "AlphaVantageFetcher", "YfinanceFetcher"),
             "get_company_overview",
-            "us_financials",
             CachePolicy(CACHE_TTLS["us_overview"]),
             persist=_persist_fact,
         ),
         RouteSpec(
             Operation.US_BALANCE_SHEET,
             StockType.US,
-            ("LocalStoreFetcher", "AlphaVantage", "YfinanceFetcher"),
+            ("LocalStoreFetcher", "AlphaVantageFetcher", "YfinanceFetcher"),
             "get_balance_sheet",
-            "us_financials",
             CachePolicy(CACHE_TTLS["us_report"]),
             persist=_persist_fact,
         ),
         RouteSpec(
             Operation.US_INCOME_STATEMENT,
             StockType.US,
-            ("LocalStoreFetcher", "AlphaVantage", "YfinanceFetcher"),
+            ("LocalStoreFetcher", "AlphaVantageFetcher", "YfinanceFetcher"),
             "get_income_statement",
-            "us_financials",
             CachePolicy(CACHE_TTLS["us_report"]),
             persist=_persist_fact,
         ),
         RouteSpec(
             Operation.US_CASH_FLOW,
             StockType.US,
-            ("LocalStoreFetcher", "AlphaVantage", "YfinanceFetcher"),
+            ("LocalStoreFetcher", "AlphaVantageFetcher", "YfinanceFetcher"),
             "get_cash_flow",
-            "us_financials",
             CachePolicy(CACHE_TTLS["us_report"]),
             persist=_persist_fact,
         ),
         RouteSpec(
             Operation.US_EARNINGS,
             StockType.US,
-            ("LocalStoreFetcher", "AlphaVantage", "YfinanceFetcher"),
+            ("LocalStoreFetcher", "AlphaVantageFetcher", "YfinanceFetcher"),
             "get_earnings",
-            "us_financials",
             CachePolicy(CACHE_TTLS["us_earnings"]),
             persist=_persist_fact,
         ),
         RouteSpec(
             Operation.US_NEWS_SENTIMENT,
             StockType.US,
-            ("AlphaVantage",),
+            ("AlphaVantageFetcher",),
             "get_news_sentiment",
-            "us_financials",
         ),
         RouteSpec(
             Operation.US_INSIDER,
             StockType.US,
-            ("LocalStoreFetcher", "AlphaVantage", "YfinanceFetcher"),
+            ("LocalStoreFetcher", "AlphaVantageFetcher", "YfinanceFetcher"),
             "get_insider_transactions",
-            "us_financials",
             CachePolicy(CACHE_TTLS["us_insider"]),
             persist=_persist_fact,
         ),
         RouteSpec(
             Operation.US_TECH_INDICATOR,
             StockType.US,
-            ("AlphaVantage",),
+            ("AlphaVantageFetcher",),
             "get_technical_indicator",
-            "us_financials",
         ),
         # ---- Akshare 独有方法（业绩 / 分红 / 新闻）----
         RouteSpec(
@@ -310,49 +291,42 @@ def create_default_routes() -> RouteRegistry:
             None,
             ("AkshareFetcher",),
             "get_bid_ask",
-            "bid_ask",
         ),
         RouteSpec(
             Operation.EARNINGS_FORECAST,
             None,
             ("AkshareFetcher",),
             "get_earnings_forecast",
-            "forecast",
         ),
         RouteSpec(
             Operation.EARNINGS_REPORT,
             None,
             ("AkshareFetcher",),
             "get_earnings_report",
-            "earnings",
         ),
         RouteSpec(
             Operation.EARNINGS_EXPRESS,
             None,
             ("AkshareFetcher",),
             "get_earnings_express",
-            "express",
         ),
         RouteSpec(
             Operation.DIVIDEND_PLAN,
             None,
             ("AkshareFetcher",),
             "get_dividend_plan",
-            "dividend_plan",
         ),
         RouteSpec(
             Operation.DIVIDEND_CNINFO,
             None,
             ("AkshareFetcher",),
             "get_dividend_cninfo",
-            "dividend_cninfo",
         ),
         RouteSpec(
             Operation.CCTV_NEWS,
             None,
             ("AkshareFetcher",),
             "get_cctv_news",
-            "cctv_news",
         ),
     ]
     return RouteRegistry(routes)

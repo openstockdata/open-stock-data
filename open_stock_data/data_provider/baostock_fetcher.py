@@ -11,6 +11,7 @@ import pandas as pd
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from .base import BaseFetcher, DataFetchError, NETWORK_EXCEPTIONS
+from .boards import normalize_belong_board
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -20,7 +21,6 @@ class BaostockFetcher(BaseFetcher):
 
     name = "BaostockFetcher"
     priority = 3  # A 股日线
-    backend_group = "baostock"
 
     def __init__(self):
         super().__init__()
@@ -242,7 +242,8 @@ class BaostockFetcher(BaseFetcher):
 
                 preferred = ['股票代码', '股票名称', '行业', '市场', '证券类型', '状态', '上市日期', '退市日期']
                 cols = [c for c in preferred if c in df.columns]
-                return df[cols].copy() if cols else df
+                df = df[cols].copy() if cols else df
+                return normalize_belong_board(df)
             except Exception as e:
                 _LOGGER.warning(f"[{self.name}] query_stock_basic 获取 {stock_code} 所属板块失败: {e}")
                 return None

@@ -25,7 +25,6 @@ class TickflowFetcher(BaseFetcher):
 
     name = "TickflowFetcher"
     priority = 10  # 网络请求第一位
-    backend_group = "tickflow"
 
     DEFAULT_API_URL = "https://api.tickflow.org"
     DEFAULT_FREE_API_URL = "https://free-api.tickflow.org"

@@ -3,7 +3,6 @@ import pytest
 
 from open_stock_data.client import OpenStockDataClient
 from open_stock_data.data_provider.base import BaseFetcher
-from open_stock_data.data_provider.circuit_breaker import get_circuit_breaker
 from open_stock_data.data_provider.contracts import CachePolicy, Operation, RouteSpec
 from open_stock_data.data_provider.routing import RouteRegistry
 from open_stock_data.data_provider.local_store import LocalStore
@@ -56,14 +55,12 @@ def client_routes():
                 StockType.A_STOCK,
                 ("dummy",),
                 "get_daily_data",
-                "daily",
             ),
             RouteSpec(
                 Operation.REALTIME_QUOTE,
                 StockType.A_STOCK,
                 ("dummy",),
                 "get_realtime_quote",
-                "realtime",
                 validator=lambda value: value.has_basic_data(),
             ),
             RouteSpec(
@@ -71,20 +68,9 @@ def client_routes():
                 StockType.A_STOCK,
                 ("dummy",),
                 "get_a_stock_spot",
-                "spot",
             ),
         ]
     )
-
-
-@pytest.fixture(autouse=True)
-def reset_breakers():
-    for name in (
-        "daily", "realtime", "spot", "fund_flow", "chip", "board",
-        "billboard", "margin", "industry_pe", "dividend", "fund_holder", "top10_holders",
-        "us_financials",
-    ):
-        get_circuit_breaker(name).reset()
 
 
 def _mem_store():
@@ -260,14 +246,14 @@ class AtomFetcher(BaseFetcher):
         return df
 
 
-def atom_route(operation, method, breaker, providers=("dummy",), **overrides):
-    return RouteSpec(operation, None, providers, method, breaker, **overrides)
+def atom_route(operation, method, providers=("dummy",), **overrides):
+    return RouteSpec(operation, None, providers, method, **overrides)
 
 
 def test_fund_flow_route_returns_dataframe_with_source():
     frame = pd.DataFrame([{"日期": "2026-01-01", "主力净流入": 100.0}])
     fetcher = AtomFetcher("dummy", get_fund_flow=frame)
-    routes = RouteRegistry([atom_route(Operation.FUND_FLOW, "get_fund_flow", "fund_flow")])
+    routes = RouteRegistry([atom_route(Operation.FUND_FLOW, "get_fund_flow")])
     client = OpenStockDataClient({"dummy": fetcher}, routes, cache=None)
 
     result = client.fund_flow("600519")
@@ -278,7 +264,7 @@ def test_fund_flow_route_returns_dataframe_with_source():
 
 def test_fund_flow_all_sources_failed_raises():
     fetcher = AtomFetcher("dummy", get_fund_flow=ConnectionError("down"))
-    routes = RouteRegistry([atom_route(Operation.FUND_FLOW, "get_fund_flow", "fund_flow")])
+    routes = RouteRegistry([atom_route(Operation.FUND_FLOW, "get_fund_flow")])
     client = OpenStockDataClient({"dummy": fetcher}, routes, cache=None)
 
     with pytest.raises(AllSourcesFailed):
@@ -288,7 +274,7 @@ def test_fund_flow_all_sources_failed_raises():
 def test_chip_distribution_route_returns_model():
     chip = ChipDistribution(code="600519", source="akshare")
     fetcher = AtomFetcher("dummy", get_chip_distribution=chip)
-    routes = RouteRegistry([atom_route(Operation.CHIP_DISTRIBUTION, "get_chip_distribution", "chip")])
+    routes = RouteRegistry([atom_route(Operation.CHIP_DISTRIBUTION, "get_chip_distribution")])
     client = OpenStockDataClient({"dummy": fetcher}, routes, cache=None)
 
     result = client.chip_distribution("600519")
@@ -302,14 +288,33 @@ def test_belong_board_falls_back_to_second_provider():
     first = AtomFetcher("first", get_belong_board=ConnectionError("down"))
     second = AtomFetcher("second", get_belong_board=frame)
     routes = RouteRegistry([
-        atom_route(Operation.BELONG_BOARD, "get_belong_board", "board", providers=("first", "second"))
+        atom_route(Operation.BELONG_BOARD, "get_belong_board", providers=("first", "second"))
     ])
     client = OpenStockDataClient({"first": first, "second": second}, routes, cache=None)
 
     result = client.belong_board("600519")
 
     assert result.source == "second"
-    assert list(result.data.columns) == ["板块名称"]
+    # 客户端统一 schema：板块名称 / 板块代码 / 板块类型 固定在前
+    assert list(result.data.columns)[:3] == ["板块名称", "板块代码", "板块类型"]
+    assert result.data.iloc[0]["板块名称"] == "白酒"
+
+
+def test_belong_board_normalizes_legacy_tushare_frame():
+    """修复前 Tushare 只给 股票代码/股票名称/行业：客户端要把 行业 提升为 板块名称。"""
+    frame = pd.DataFrame([{"股票代码": "601298.SH", "股票名称": "青岛港", "行业": "港口", "市场": "主板"}])
+    fetcher = AtomFetcher("dummy", get_belong_board=frame)
+    routes = RouteRegistry([atom_route(Operation.BELONG_BOARD, "get_belong_board")])
+    client = OpenStockDataClient({"dummy": fetcher}, routes, cache=None)
+
+    result = client.belong_board("601298")
+
+    row = result.data.iloc[0]
+    assert list(result.data.columns)[0] == "板块名称"
+    assert row["板块名称"] == "港口"
+    assert row["板块类型"] == "industry"
+    assert row["股票代码"] == "601298.SH"
+    assert "行业" in result.data.columns  # 原列保留
 
 
 def test_board_cons_passes_board_type_argument():
@@ -321,7 +326,7 @@ def test_board_cons_passes_board_type_argument():
             return pd.DataFrame([{"代码": "600519"}])
 
     fetcher = RecordingFetcher("dummy")
-    routes = RouteRegistry([atom_route(Operation.BOARD_CONS, "get_board_cons", "board")])
+    routes = RouteRegistry([atom_route(Operation.BOARD_CONS, "get_board_cons")])
     client = OpenStockDataClient({"dummy": fetcher}, routes, cache=None)
 
     result = client.board_cons("白酒", "concept")
@@ -333,7 +338,7 @@ def test_board_cons_passes_board_type_argument():
 def test_billboard_route_returns_dataframe():
     frame = pd.DataFrame([{"名称": "贵州茅台"}])
     fetcher = AtomFetcher("dummy", get_billboard=frame)
-    routes = RouteRegistry([atom_route(Operation.BILLBOARD, "get_billboard", "billboard")])
+    routes = RouteRegistry([atom_route(Operation.BILLBOARD, "get_billboard")])
     client = OpenStockDataClient({"dummy": fetcher}, routes, cache=None)
 
     result = client.billboard("5")
@@ -346,7 +351,7 @@ def test_industry_pe_route_preserves_attrs():
     frame = pd.DataFrame([{"行业层级": 1.0, "静态市盈率-加权平均": 12.0}])
     frame.attrs["data_date"] = "20260710"
     fetcher = AtomFetcher("dummy", get_industry_pe=frame)
-    routes = RouteRegistry([atom_route(Operation.INDUSTRY_PE, "get_industry_pe", "industry_pe")])
+    routes = RouteRegistry([atom_route(Operation.INDUSTRY_PE, "get_industry_pe")])
     client = OpenStockDataClient({"dummy": fetcher}, routes, cache=None)
 
     result = client.industry_pe("20260710")
@@ -360,7 +365,7 @@ def test_dividend_history_falls_back_to_akshare():
     tushare = AtomFetcher("TushareFetcher", get_dividend_history=ConnectionError("down"))
     akshare = AtomFetcher("AkshareFetcher", get_dividend_history=frame)
     routes = RouteRegistry([
-        atom_route(Operation.DIVIDEND_HISTORY, "get_dividend_history", "dividend",
+        atom_route(Operation.DIVIDEND_HISTORY, "get_dividend_history",
                    providers=("TushareFetcher", "AkshareFetcher"))
     ])
     client = OpenStockDataClient({"TushareFetcher": tushare, "AkshareFetcher": akshare}, routes, cache=None)
@@ -379,7 +384,7 @@ def test_fund_holder_passes_date_kwarg():
             return pd.DataFrame([{"股票代码": "600519"}])
 
     fetcher = RecordingFetcher("dummy")
-    routes = RouteRegistry([atom_route(Operation.FUND_HOLDER, "get_fund_holder", "fund_holder")])
+    routes = RouteRegistry([atom_route(Operation.FUND_HOLDER, "get_fund_holder")])
     client = OpenStockDataClient({"dummy": fetcher}, routes, cache=None)
 
     result = client.fund_holder("", date="20260630")
@@ -399,7 +404,7 @@ def test_top10_holders_passes_holder_type_and_falls_back():
     tushare = AtomFetcher("TushareFetcher", get_top10_holders=ConnectionError("down"))
     akshare = RecordingAkshare("AkshareFetcher")
     routes = RouteRegistry([
-        atom_route(Operation.TOP10_HOLDERS, "get_top10_holders", "top10_holders",
+        atom_route(Operation.TOP10_HOLDERS, "get_top10_holders",
                    providers=("TushareFetcher", "AkshareFetcher"))
     ])
     client = OpenStockDataClient({"TushareFetcher": tushare, "AkshareFetcher": akshare}, routes, cache=None)
@@ -412,8 +417,8 @@ def test_top10_holders_passes_holder_type_and_falls_back():
 
 def _margin_routes():
     return RouteRegistry([
-        atom_route(Operation.MARGIN_DETAIL, "get_margin_detail", "margin", providers=("AkshareFetcher",)),
-        atom_route(Operation.MARGIN_RATIO, "get_margin_ratio", "margin", providers=("AkshareFetcher",)),
+        atom_route(Operation.MARGIN_DETAIL, "get_margin_detail", providers=("AkshareFetcher",)),
+        atom_route(Operation.MARGIN_RATIO, "get_margin_ratio", providers=("AkshareFetcher",)),
     ])
 
 
@@ -485,7 +490,7 @@ def _us_routes():
         (Operation.US_TECH_INDICATOR, "get_technical_indicator"),
     ]
     return RouteRegistry([
-        atom_route(op, method, "us_financials", providers=("AlphaVantage",)) for op, method in specs
+        atom_route(op, method, providers=("AlphaVantage",)) for op, method in specs
     ])
 
 
@@ -522,7 +527,7 @@ def test_us_earnings_news_insider_tech_routes():
 
 def test_us_route_all_sources_failed_raises():
     fetcher = AtomFetcher("AlphaVantage", get_company_overview=ConnectionError("down"))
-    routes = RouteRegistry([atom_route(Operation.US_OVERVIEW, "get_company_overview", "us_financials", providers=("AlphaVantage",))])
+    routes = RouteRegistry([atom_route(Operation.US_OVERVIEW, "get_company_overview", providers=("AlphaVantage",))])
     client = OpenStockDataClient({"AlphaVantage": fetcher}, routes, cache=None)
     with pytest.raises(AllSourcesFailed):
         client.us_overview("AAPL")

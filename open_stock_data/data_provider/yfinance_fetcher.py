@@ -22,7 +22,6 @@ class YfinanceFetcher(BaseFetcher):
 
     name = "YfinanceFetcher"
     priority = 9  # 港股/美股第一位
-    backend_group = "yahoo"
 
     def __init__(self):
         super().__init__()

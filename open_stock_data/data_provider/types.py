@@ -1,7 +1,6 @@
 """统一数据类型定义。
 
-熔断器迁至 circuit_breaker.py，列名转换迁至 columns.py，
-股票代码归一/识别迁至 stock_code.py。
+列名转换见 columns.py，股票代码归一/识别见 stock_code.py。
 """
 
 from enum import Enum
