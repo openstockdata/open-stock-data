@@ -10,10 +10,9 @@ from datetime import datetime, timedelta
 from pydantic import Field
 
 from ...utils import (
-    get_data_manager,
     format_source_name,
-    get_akshare_source,
     field_symbol,
+    get_akshare_source,
     resolve_field,
 )
 from ...client import get_default_client
@@ -38,18 +37,14 @@ def stock_locked_shares(
             end_date = (datetime.now() + timedelta(days=30)).strftime("%Y%m%d")
 
         if mode == "summary":
-            df = get_data_manager().fetch_akshare(
-                ak.stock_restricted_release_summary_em,
-                start_date=start_date,
-                end_date=end_date,
-                ttl=43200,
-            )
+            result = get_default_client().locked_shares("summary", limit)
+            df = result.data
             if df is None or df.empty:
                 return f"未获取到限售解禁汇总数据 ({start_date} ~ {end_date})"
 
             lines = [
                 f"# 限售解禁日历 (汇总)",
-                f"# 数据来源: {get_akshare_source(ak.stock_restricted_release_summary_em)}",
+                "# 数据来源: akshare",
                 f"# 日期范围: {start_date} ~ {end_date}",
                 "# 每日解禁汇总",
             ]
@@ -68,18 +63,14 @@ def stock_locked_shares(
             return "\n".join(lines)
 
         else:
-            df = get_data_manager().fetch_akshare(
-                ak.stock_restricted_release_detail_em,
-                start_date=start_date,
-                end_date=end_date,
-                ttl=43200,
-            )
+            result = get_default_client().locked_shares("detail", limit)
+            df = result.data
             if df is None or df.empty:
                 return f"未获取到限售解禁明细数据 ({start_date} ~ {end_date})"
 
             lines = [
                 f"# 限售解禁日历 (明细)",
-                f"# 数据来源: {get_akshare_source(ak.stock_restricted_release_detail_em)}",
+                "# 数据来源: akshare",
                 f"# 日期范围: {start_date} ~ {end_date}",
                 f"# 共 {len(df)} 只股票即将解禁",
             ]
@@ -128,10 +119,8 @@ def stock_pledge_ratio(
         mode = resolve_field(mode, "industry")
         limit = resolve_field(limit, 30)
         if mode == "industry":
-            df = get_data_manager().fetch_akshare(
-                ak.stock_gpzy_industry_data_em,
-                ttl=86400,
-            )
+            result = get_default_client().pledge_ratio("industry", limit)
+            df = result.data
             if df is None or df.empty:
                 return "获取行业质押数据失败"
 
@@ -140,7 +129,7 @@ def stock_pledge_ratio(
 
             lines = [
                 "# 行业股权质押统计",
-                f"# 数据来源: {get_akshare_source(ak.stock_gpzy_industry_data_em)}",
+                "# 数据来源: akshare",
                 "# 各行业质押情况 (按质押比例降序)",
             ]
 
@@ -175,16 +164,14 @@ def stock_pledge_ratio(
             return "\n".join(lines)
 
         else:
-            df = get_data_manager().fetch_akshare(
-                ak.stock_gpzy_profile_em,
-                ttl=86400,
-            )
+            result = get_default_client().pledge_ratio("market", limit)
+            df = result.data
             if df is None or df.empty:
                 return "获取市场质押趋势数据失败"
 
             lines = [
                 "# A股市场股权质押趋势",
-                f"# 数据来源: {get_akshare_source(ak.stock_gpzy_profile_em)}",
+                "# 数据来源: akshare",
             ]
 
             df = df.tail(limit)

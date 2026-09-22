@@ -7,7 +7,7 @@ import logging
 import random
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Tuple, Callable, Any
 
 import pandas as pd
@@ -1568,3 +1568,295 @@ class AkshareFetcher(BaseFetcher):
             except TypeError:
                 pass
         return ak.news_cctv()
+
+    # ---- 新增市场概览方法 ----
+
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
+        reraise=True
+    )
+    def get_market_pe_percentile(self) -> Optional[pd.DataFrame]:
+        """获取全市场PE/PB历史分位"""
+        self.random_sleep(0.5, 1.5)
+        pe_df = ak.stock_a_ttm_lyr()
+        pb_df = ak.stock_a_all_pb()
+        if pe_df is None or pe_df.empty:
+            return None
+        result = pe_df.copy()
+        if pb_df is not None and not pb_df.empty:
+            result = result.merge(pb_df, on="日期", how="outer")
+        result.attrs["requested_date"] = datetime.now().strftime("%Y%m%d")
+        result.attrs["data_date"] = result.iloc[-1].get("日期", "") if not result.empty else ""
+        return result
+
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
+        reraise=True
+    )
+    def get_earnings_calendar(self, period: str = "") -> Optional[pd.DataFrame]:
+        """获取财报披露日历"""
+        self.random_sleep(0.3, 0.8)
+        if not isinstance(period, str) or not period:
+            now = datetime.now()
+            year = now.year
+            month = now.month
+            if month <= 4:
+                period = f"{year-1}年报"
+            elif month <= 8:
+                period = f"{year}半年报"
+            elif month <= 10:
+                period = f"{year}三季报"
+            else:
+                period = f"{year}年报"
+        return ak.stock_report_disclosure(market="沪深京", period=period)
+
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
+        reraise=True
+    )
+    def get_financial_compare(self, symbol: str) -> Optional[pd.DataFrame]:
+        """获取个股财务指标对比"""
+        self.random_sleep(0.3, 0.8)
+        end_year = datetime.now().year
+        return ak.stock_financial_analysis_indicator(symbol=symbol, start_year=str(end_year - 2))
+
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
+        reraise=True
+    )
+    def get_stock_info(self, symbol: str) -> Optional[pd.DataFrame]:
+        """获取个股基本信息（A股/港股；美股无对应接口返回 None）"""
+        self.random_sleep(0.3, 0.8)
+        if is_hk_code(symbol):
+            return ak.stock_hk_security_profile_em(symbol=symbol)
+        return self._call_ak_func_with_symbol_fallback(
+            ak.stock_individual_info_em,
+            symbol,
+            include_no_arg=False,
+            allow_unfiltered_no_arg=False,
+            require_stock_match=True,
+        )
+
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
+        reraise=True
+    )
+    def get_stock_indicators(self, symbol: str) -> Optional[pd.DataFrame]:
+        """获取股票财务指标（A股/港股/美股）"""
+        self.random_sleep(0.3, 0.8)
+        if is_hk_code(symbol):
+            return ak.stock_financial_hk_analysis_indicator_em(
+                symbol=symbol, indicator="报告期"
+            )
+        if not str(symbol).replace(".", "").isdigit():
+            return ak.stock_financial_us_analysis_indicator_em(
+                symbol=symbol, indicator="单季报"
+            )
+        return self._call_ak_func_with_symbol_fallback(
+            ak.stock_financial_abstract_ths,
+            symbol,
+            include_no_arg=False,
+            allow_unfiltered_no_arg=False,
+            require_stock_match=True,
+        )
+
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
+        reraise=True
+    )
+    def get_current_time(self) -> Optional[pd.DataFrame]:
+        """获取当前交易日信息"""
+        self.random_sleep(0.3, 0.8)
+        return ak.tool_trade_date_hist_sina()
+
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
+        reraise=True
+    )
+    def get_zt_pool(self, pool_type: str = "涨停", date: str = "") -> Optional[pd.DataFrame]:
+        """获取涨停/强势/跌停/昨日涨停股池"""
+        self.random_sleep(0.3, 0.8)
+        if not date:
+            date = datetime.now().strftime("%Y%m%d")
+        funcs = {
+            "涨停": ak.stock_zt_pool_em,
+            "强势": ak.stock_zt_pool_strong_em,
+            "跌停": ak.stock_zt_pool_dtgc_em,
+            "昨日涨停": ak.stock_zt_pool_zbgc_em,
+        }
+        fn = funcs.get(pool_type, ak.stock_zt_pool_em)
+        return fn(date=date)
+
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
+        reraise=True
+    )
+    def get_index_daily(
+        self, symbol: str, period: str = "daily", days: int = 30
+    ) -> Optional[pd.DataFrame]:
+        """获取A股指数历史行情（东财 index_zh_a_hist，支持日/周/月）"""
+        self.random_sleep(0.3, 0.8)
+        if period == "weekly":
+            delta = {"weeks": days + 62}
+        else:
+            delta = {"days": days + 62}
+        start_date = (datetime.now() - timedelta(**delta)).strftime("%Y%m%d")
+        end_date = datetime.now().strftime("%Y%m%d")
+        return ak.index_zh_a_hist(
+            symbol=symbol, period=period, start_date=start_date, end_date=end_date
+        )
+
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
+        reraise=True
+    )
+    def get_north_flow(self, indicator: str = "北向资金") -> Optional[pd.DataFrame]:
+        """获取北向资金流向"""
+        self.random_sleep(0.3, 0.8)
+        return ak.stock_hsgt_fund_flow_summary_em()
+
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
+        reraise=True
+    )
+    def get_sector_fund_flow_rank(self, days: str = "今日", cate: str = "行业资金流") -> Optional[pd.DataFrame]:
+        """获取板块资金流排名"""
+        self.random_sleep(0.3, 0.8)
+        return ak.stock_sector_fund_flow_rank(indicator=days, sector_type=cate)
+
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
+        reraise=True
+    )
+    def get_block_trade(self, symbol: str = "", limit: int = 10) -> Optional[pd.DataFrame]:
+        """获取大宗交易数据：有 symbol 返回个股明细，无 symbol 返回全市场每日统计"""
+        self.random_sleep(0.3, 0.8)
+        end_date = datetime.now().strftime("%Y%m%d")
+        start_date = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
+        if symbol:
+            return ak.stock_dzjy_mrmx(symbol=symbol, start_date=start_date, end_date=end_date)
+        return ak.stock_dzjy_mrtj(start_date=start_date, end_date=end_date)
+
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
+        reraise=True
+    )
+    def get_holder_num(self, symbol: str = "") -> Optional[pd.DataFrame]:
+        """获取股东人数"""
+        self.random_sleep(0.3, 0.8)
+        return ak.stock_zh_a_gdhs_detail_em(symbol=symbol)
+
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
+        reraise=True
+    )
+    def get_locked_shares(self, mode: str = "detail", limit: int = 20) -> Optional[pd.DataFrame]:
+        """获取限售解禁日历（今天起 30 天窗口）"""
+        self.random_sleep(0.3, 0.8)
+        start_date = datetime.now().strftime("%Y%m%d")
+        end_date = (datetime.now() + timedelta(days=30)).strftime("%Y%m%d")
+        if mode == "detail":
+            return ak.stock_restricted_release_detail_em(start_date=start_date, end_date=end_date)
+        return ak.stock_restricted_release_summary_em(start_date=start_date, end_date=end_date)
+
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
+        reraise=True
+    )
+    def get_pledge_ratio(self, mode: str = "industry", limit: int = 20) -> Optional[pd.DataFrame]:
+        """获取股权质押数据"""
+        self.random_sleep(0.3, 0.8)
+        if mode == "industry":
+            return ak.stock_gpzy_industry_data_em()
+        return ak.stock_gpzy_profile_em()
+
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
+        reraise=True
+    )
+    def get_news(self, symbol: str = "", limit: int = 15) -> Optional[pd.DataFrame]:
+        """获取个股新闻"""
+        self.random_sleep(0.3, 0.8)
+        try:
+            resp = requests.get(
+                "https://search-api-web.eastmoney.com/search/jsonp",
+                headers={"User-Agent": self.get_random_user_agent(), "Referer": f"https://so.eastmoney.com/news/s?keyword={symbol}"},
+                params={
+                    "cb": "jQuery351013927587392975826_1763361926020",
+                    "param": '{"uid":"","keyword":"' + symbol + '","type":["cmsArticleWebOld"],"client":"web","clientType":"web","clientVersion":"curr","param":{"cmsArticleWebOld":{"searchScope":"default","sort":"default","pageIndex":1,"pageSize":10,"preTag":"<em>","postTag":"</em>"}}}',
+                },
+                timeout=20,
+            )
+            text = resp.text.replace("jQuery351013927587392975826_1763361926020", "").strip().strip("()")
+            import json
+            data = json.loads(text) or {}
+            dfs = pd.DataFrame(data.get("result", {}).get("cmsArticleWebOld") or [])
+            if dfs is None or dfs.empty:
+                return dfs
+            if "date" in dfs.columns:
+                dfs.sort_values("date", ascending=False, inplace=True)
+            return dfs.head(limit)
+        except Exception:
+            return None
+
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
+        reraise=True
+    )
+    def get_news_global(self) -> Optional[pd.DataFrame]:
+        """获取新浪财经全球快讯（返回原帧，列选择交给调用方）"""
+        self.random_sleep(0.3, 0.8)
+        return ak.stock_info_global_sina()
+
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(NETWORK_EXCEPTIONS),
+        reraise=True
+    )
+    def get_margin_trading(self, symbol: str = "", market: str = "sh") -> Optional[pd.DataFrame]:
+        """获取交易所融资融券汇总（market: sh/sz；symbol 为空时返回全市场）"""
+        self.random_sleep(0.3, 0.8)
+        if market == "sz":
+            df = ak.stock_margin_szse(start_date="", end_date="")
+        else:
+            df = ak.stock_margin_sse(start_date="", end_date="")
+        if df is None or df.empty or not symbol:
+            return df
+        code_col = next((c for c in ("标的证券", "证券代码", "代码") if c in df.columns), None)
+        if code_col is None:
+            return df
+        matched = df[df[code_col].astype(str).str.contains(str(symbol), na=False)]
+        return matched if not matched.empty else df

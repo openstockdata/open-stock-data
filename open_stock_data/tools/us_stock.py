@@ -26,6 +26,124 @@ from ..indicators import add_technical_indicators, STOCK_PRICE_COLUMNS
 _LOGGER = logging.getLogger(__name__)
 
 
+# ==================== 概览/新闻文本格式化（MCP 展示层）====================
+
+
+def _format_big_number(value: str) -> str:
+    """格式化大数字"""
+    if not value or value == "None":
+        return "-"
+    try:
+        num = float(value)
+        if num >= 1e12:
+            return f"{num/1e12:.2f}T"
+        elif num >= 1e9:
+            return f"{num/1e9:.2f}B"
+        elif num >= 1e6:
+            return f"{num/1e6:.2f}M"
+        else:
+            return f"{num:,.0f}"
+    except (ValueError, TypeError):
+        return value
+
+
+def _format_overview_report(overview: dict) -> str:
+    """格式化公司概览报告 (CSV 格式)"""
+    if not overview:
+        return "无数据"
+
+    lines = [
+        f"# {overview.get('Name', '')} ({overview.get('Symbol', '')})",
+        "# 数据来源: 美股行情服务商",
+        "",
+        "# 基本信息",
+        "行业,板块,国家,交易所",
+        f"{overview.get('Industry', '-')},{overview.get('Sector', '-')},{overview.get('Country', '-')},{overview.get('Exchange', '-')}",
+        "",
+        "# 估值指标",
+        "市值,市盈率(PE),远期市盈率,市净率(PB),市销率(PS),PEG比率",
+        f"${_format_big_number(overview.get('MarketCapitalization'))},{overview.get('PERatio', '-')},{overview.get('ForwardPE', '-')},{overview.get('PriceToBookRatio', '-')},{overview.get('PriceToSalesRatioTTM', '-')},{overview.get('PEGRatio', '-')}",
+        "",
+        "# 盈利指标",
+        "每股收益(EPS),每股净资产,净利润率,营业利润率,ROE,ROA",
+        f"${overview.get('EPS', '-')},${overview.get('BookValue', '-')},{overview.get('ProfitMargin', '-')},{overview.get('OperatingMarginTTM', '-')},{overview.get('ReturnOnEquityTTM', '-')},{overview.get('ReturnOnAssetsTTM', '-')}",
+        "",
+        "# 股息信息",
+        "股息率,每股股息,除息日",
+        f"{overview.get('DividendYield', '-')},${overview.get('DividendPerShare', '-')},{overview.get('ExDividendDate', '-')}",
+        "",
+        "# 价格区间",
+        "52周最高,52周最低,50日均价,200日均价",
+        f"${overview.get('52WeekHigh', '-')},${overview.get('52WeekLow', '-')},${overview.get('50DayMovingAverage', '-')},${overview.get('200DayMovingAverage', '-')}",
+        "",
+        "# 分析师评级",
+        "目标价,强烈买入,买入,持有,卖出,强烈卖出",
+        f"${overview.get('AnalystTargetPrice', '-')},{overview.get('AnalystRatingStrongBuy', '-')},{overview.get('AnalystRatingBuy', '-')},{overview.get('AnalystRatingHold', '-')},{overview.get('AnalystRatingSell', '-')},{overview.get('AnalystRatingStrongSell', '-')}",
+    ]
+    return "\n".join(lines)
+
+
+def _format_news_report(news_data: dict, limit: int = 10) -> str:
+    """格式化新闻情绪报告 (CSV 格式)"""
+    if not news_data or not news_data.get("feed"):
+        return "无新闻数据"
+
+    lines = [
+        "# 新闻情绪分析",
+        "# 数据来源: Alpha Vantage",
+        f"# 共 {news_data.get('items_count', 0)} 条新闻",
+        "",
+        "# 新闻列表",
+        "序号,标题,来源,时间,情绪,情绪分数",
+    ]
+
+    news_rows = []
+    ticker_rows = []
+
+    for i, item in enumerate(news_data["feed"][:limit]):
+        title = item.get("title", "").replace(",", "，")  # 避免CSV分隔符冲突
+        source = item.get("source", "")
+        time_published = item.get("time_published", "")
+        overall_sentiment = item.get("overall_sentiment_label", "")
+        try:
+            sentiment_score = float(item.get("overall_sentiment_score", 0))
+        except (ValueError, TypeError):
+            sentiment_score = 0.0
+
+        if time_published:
+            try:
+                dt = datetime.strptime(time_published[:8], "%Y%m%d")
+                time_published = dt.strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+
+        news_rows.append(f"{i + 1},{title},{source},{time_published},{overall_sentiment},{sentiment_score:.3f}")
+
+        ticker_sentiments = item.get("ticker_sentiment", [])
+        for ts in ticker_sentiments[:3]:
+            ticker = ts.get("ticker", "")
+            try:
+                relevance = float(ts.get("relevance_score", 0))
+            except (ValueError, TypeError):
+                relevance = 0.0
+            try:
+                sent_score = float(ts.get("ticker_sentiment_score", 0))
+            except (ValueError, TypeError):
+                sent_score = 0.0
+            sent_label = ts.get("ticker_sentiment_label", "")
+            ticker_rows.append(f"{i + 1},{ticker},{sent_label},{sent_score:.3f},{relevance:.3f}")
+
+    lines.extend(news_rows)
+
+    if ticker_rows:
+        lines.append("")
+        lines.append("# 相关股票情绪")
+        lines.append("新闻序号,股票,情绪,情绪分数,相关度")
+        lines.extend(ticker_rows)
+
+    return "\n".join(lines)
+
+
 def _download_yfinance_prices(symbol: str, start_dt: str) -> pd.DataFrame | None:
     import yfinance as yf
 
@@ -57,6 +175,24 @@ def _fetch_global_prices(symbol: str, market: str, start_date: str, period: str 
     symbol = normalize_stock_code(symbol, market)
     label = "港股" if market == "hk" else "美股"
     hk_symbol = symbol.lstrip('0') or '0'
+
+    # 0. client 路由（HK: Yfinance→Akshare; US: LocalStore→AlphaVantage→Yfinance）
+    try:
+        end_date = datetime.now().strftime("%Y%m%d")
+        days = max((datetime.now() - datetime.strptime(start_date, "%Y%m%d")).days, 30)
+        result = get_default_client().daily_prices(
+            symbol, market=market, start_date=start_date, end_date=end_date,
+            days=days, period=period,
+        )
+        if result.data is not None and not result.data.empty:
+            dfs = to_chinese_columns(result.data)
+            dfs["换手率"] = None
+            if "日期" in dfs.columns:
+                dfs["日期"] = pd.to_datetime(dfs["日期"], errors="coerce").dt.strftime("%Y-%m-%d")
+            dfs.attrs["source"] = format_source_name(result.source)
+            return dfs
+    except Exception as e:
+        _LOGGER.debug(f"[{label}] client.daily_prices 获取失败 {symbol}: {e}")
 
     # 1. akshare
     try:
@@ -177,7 +313,7 @@ def stock_overview_us(
     try:
         symbol = resolve_field(symbol, "")
         overview = get_default_client().us_overview(symbol).data
-        return get_data_manager().format_us_overview_report(overview)
+        return _format_overview_report(overview)
     except AllSourcesFailed:
         raise
     except Exception as e:
@@ -291,7 +427,7 @@ def stock_news_us(
             topics=topics if isinstance(topics, str) and topics else None,
             limit=min(limit, 50),
         ).data
-        return get_data_manager().format_us_news_report(news_data, limit)
+        return _format_news_report(news_data, limit)
     except AllSourcesFailed:
         raise
     except Exception as e:

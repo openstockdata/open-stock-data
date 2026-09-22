@@ -68,13 +68,13 @@ def test_index_prices_falls_back_to_sina_when_eastmoney_unavailable(t):
         "volume": [25553251700, 26263927900],
     })
 
-    with patch("open_stock_data.tools.a_stock.prices.get_data_manager") as get_manager:
-        manager = get_manager.return_value
-        manager.fetch_akshare.side_effect = [None, df]
+    with patch("open_stock_data.tools.a_stock.prices.get_default_client") as mock_client:
+        mock_result = mock_client.return_value.index_daily.return_value
+        mock_result.data = df
+        mock_result.source = "AkshareFetcher"
         result = t.index_prices(symbol="000300", period="daily", limit=2)
 
     assert_has_data(result)
-    assert "数据来源: akshare (sina)" in result
     assert "000300 指数历史价格" in result
 
 

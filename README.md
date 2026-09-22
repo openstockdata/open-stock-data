@@ -1,6 +1,6 @@
 # open-stock-data
 
-`open-stock-data` 是一个面向股票、指数、加密货币和财经新闻的数据工具库。项目以普通 Python 函数形式提供 43 个工具，覆盖 A 股、港股、美股、ETF、A 股指数、OKX、Binance 和财经新闻，并在多类行情/财务数据上内置多数据源故障转移。
+`open-stock-data` 是一个面向股票、指数、加密货币和财经新闻的数据工具库。项目以普通 Python 函数形式提供 43 个工具，覆盖 A 股、港股、美股、ETF、A 股指数、OKX、Binance 和财经新闻，并在多类行情/财务数据上内置多数据源故障转移。工具面向 MCP/展示场景（返回格式化文本），内部统一经 `OpenStockDataClient` 取数；程序化取数请直接使用 client。
 
 ## 安装
 
@@ -37,7 +37,27 @@ batch = client.batch_realtime_quotes(["600519", "000001"])   # BatchFetchResult�
 flow = client.fund_flow("600519")                            # 分析类：源生列
 ```
 
-价格/快照返回英文标准列（date/open/close…）；资金流、板块、估值等分析类数据返回数据源原生列（多为中文）。文本工具即是这层 API 之上的展示适配器。
+价格/快照返回英文标准列（date/open/close…）；资金流、板块、估值等分析类数据返回数据源原生列（多为中文）。
+
+**分层约定：**
+
+- `OpenStockDataClient` 是**唯一取数入口**（路由 + 故障转移 + 缓存），程序化数据需求一律直接调用它；
+- `tools`（43 个文本工具）定位为 **MCP/展示层**：只负责清洗与格式化，取数内部统一走 client，与应用侧共享同一套路由和缓存；
+- 应用项目（如 `stock-data-analyst`）通过自己的适配层直接封装 client，不依赖 `tools`。
+
+client 常用方法分组（完整签名见 `open_stock_data/client.py`，均返回 `FetchResult`）：
+
+| 分组 | 方法 |
+| --- | --- |
+| 价格/行情 | `daily_prices` `index_daily` `realtime_quote` `batch_realtime_quotes` `a_stock_snapshot` `bid_ask` |
+| 个股信息/筹码/资金 | `stock_info` `stock_indicators` `financial_compare` `belong_board` `board_cons` `chip_distribution` `fund_flow` |
+| 市场资金/风险 | `zt_pool` `north_flow` `sector_fund_flow_rank` `margin_trading` `margin_detail` `block_trade` `holder_num` `locked_shares` `pledge_ratio` `billboard` |
+| 市场概览/股东 | `market_pe_percentile` `industry_pe` `earnings_calendar` `current_time` `fund_holder` `top10_holders` `dividend_history` |
+| 业绩/分红 | `earnings_forecast` `earnings_report` `earnings_express` `dividend_plan` `dividend_cninfo` |
+| 新闻 | `news` `news_global` `cctv_news` |
+| 美股 | `us_overview` `us_balance_sheet` `us_income_statement` `us_cash_flow` `us_earnings` `us_news_sentiment` `us_insider` `us_tech_indicator` |
+
+各路由的 provider 候选名单与缓存 TTL 见 [docs/PROVIDER_ROUTING.md](docs/PROVIDER_ROUTING.md)。
 
 ## 支持的代码格式
 
@@ -123,6 +143,8 @@ priority 高的 provider 优先被调用，成功率/延迟只在同优先级之
 完整的数据源能力对照和 Provider 路由配置详见 [docs/PROVIDER_ROUTING.md](docs/PROVIDER_ROUTING.md)。
 
 ## 可用工具
+
+以下工具均返回格式化文本（面向 MCP 调用/直接展示），取数统一经 `OpenStockDataClient`（见上方分层约定）；各数据的来源、回退与缓存行为见 [docs/PROVIDER_ROUTING.md](docs/PROVIDER_ROUTING.md)。
 
 ### A 股价格行情
 

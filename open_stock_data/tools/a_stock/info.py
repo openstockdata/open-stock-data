@@ -12,9 +12,11 @@ from pydantic import Field
 from ...utils import (
     field_symbol,
     field_market,
+    format_source_name,
     get_data_manager,
     resolve_field,
 )
+from ...client import get_default_client
 from ...data_provider import market_to_stock_type, normalize_stock_code, validate_stock_type, StockType
 
 
@@ -129,24 +131,20 @@ def stock_info(
     symbol = resolve_field(symbol, "")
     market = resolve_field(market, "sh")
     normalized_symbol = normalize_stock_code(symbol, market)
-    markets = [
-        ["sh", ak.stock_individual_info_em],
-        ["sz", ak.stock_individual_info_em],
-        ["hk", ak.stock_hk_security_profile_em],
-    ]
-    for m in markets:
-        if m[0] != market:
-            continue
-        all = get_data_manager().fetch_akshare(
-            m[1],
-            symbol=normalized_symbol,
-            ttl=86400 * 7,
-        )
-        if all is None or all.empty:
-            continue
-        lines = [f"# {symbol} 基本信息", f"# 数据来源: akshare", f"# 市场: {market}"]
-        lines.append(all.to_csv(index=False).strip())
-        return "\n".join(lines)
+    if market in ("sh", "sz", "hk"):
+        try:
+            result = get_default_client().stock_info(normalized_symbol)
+            df = result.data
+        except Exception:
+            df = None
+        if df is not None and not df.empty:
+            lines = [
+                f"# {symbol} 基本信息",
+                f"# 数据来源: {format_source_name(result.source)}",
+                f"# 市场: {market}",
+            ]
+            lines.append(df.to_csv(index=False).strip())
+            return "\n".join(lines)
 
     info = _ak_search(symbol=symbol, market=market)
     if info is not None:
@@ -172,47 +170,28 @@ def stock_indicators(
         market = resolve_field(market, "sh")
         normalized_symbol = normalize_stock_code(symbol, market)
         stock_type, validated_market = validate_stock_type(normalized_symbol, market)
-
-        if stock_type == StockType.A_STOCK:
-            dfs = get_data_manager().fetch_akshare(
-                ak.stock_financial_abstract_ths,
-                symbol=normalized_symbol,
-                ttl=86400 * 7,
-            )
+        market_labels = {StockType.A_STOCK: "A股", StockType.HK: "港股", StockType.US: "美股"}
+        if stock_type in market_labels:
+            label = market_labels[stock_type]
+            try:
+                result = get_default_client().stock_indicators(normalized_symbol)
+                dfs = result.data
+            except Exception:
+                dfs = None
             if dfs is None or dfs.empty:
-                return f"获取A股指标失败: {normalized_symbol}"
+                return f"获取{label}指标失败: {normalized_symbol}"
             keys = dfs.to_csv(index=False, float_format="%.3f").strip().split("\n")
-            lines = [f"# {symbol} 财务指标", f"# 数据来源: akshare", f"# 市场: A股"]
-            lines.append("\n".join([keys[0], *keys[-15:]]))
+            lines = [
+                f"# {symbol} 财务指标",
+                f"# 数据来源: {format_source_name(result.source)}",
+                f"# 市场: {label}",
+            ]
+            if stock_type == StockType.A_STOCK:
+                lines.append("\n".join([keys[0], *keys[-15:]]))
+            else:
+                lines.append("\n".join(keys[0:15]))
             return "\n".join(lines)
-        elif stock_type == StockType.HK:
-            dfs = get_data_manager().fetch_akshare(
-                ak.stock_financial_hk_analysis_indicator_em,
-                symbol=normalized_symbol,
-                indicator="报告期",
-                ttl=86400 * 7,
-            )
-            if dfs is None or dfs.empty:
-                return f"获取港股指标失败: {normalized_symbol}"
-            keys = dfs.to_csv(index=False, float_format="%.3f").strip().split("\n")
-            lines = [f"# {symbol} 财务指标", f"# 数据来源: akshare", f"# 市场: 港股"]
-            lines.append("\n".join(keys[0:15]))
-            return "\n".join(lines)
-        elif stock_type == StockType.US:
-            dfs = get_data_manager().fetch_akshare(
-                ak.stock_financial_us_analysis_indicator_em,
-                symbol=normalized_symbol,
-                indicator="单季报",
-                ttl=86400 * 7,
-            )
-            if dfs is None or dfs.empty:
-                return f"获取美股指标失败: {normalized_symbol}"
-            keys = dfs.to_csv(index=False, float_format="%.3f").strip().split("\n")
-            lines = [f"# {symbol} 财务指标", f"# 数据来源: akshare", f"# 市场: 美股"]
-            lines.append("\n".join(keys[0:15]))
-            return "\n".join(lines)
-        else:
-            return f"不支持的市场类型: {validated_market}"
+        return f"不支持的市场类型: {validated_market}"
     except Exception as exc:
         return f"获取财务指标失败: {exc}"
 
@@ -223,10 +202,8 @@ def get_current_time():
     now = datetime.now()
     week = "日一二三四五六日"[now.isoweekday()]
     texts = [f"当前时间: {now.isoformat()}, 星期{week}"]
-    dfs = get_data_manager().fetch_akshare(
-        ak.tool_trade_date_hist_sina,
-        ttl=86400 * 7,
-    )
+    result = get_default_client().current_time()
+    dfs = result.data if hasattr(result, 'data') else result
     if dfs is not None:
         start = now.date() - timedelta(days=5)
         ended = now.date() + timedelta(days=5)

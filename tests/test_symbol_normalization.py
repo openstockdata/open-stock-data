@@ -103,11 +103,19 @@ def test_stock_prices_normalizes_hk_suffix_input(monkeypatch):
 def test_stock_indicators_normalizes_hk_suffix_input(monkeypatch):
     captured = {}
 
-    def fake_ak_cache(func, *args, **kwargs):
-        captured["symbol"] = kwargs["symbol"]
-        return pd.DataFrame([{"报告期": "2025Q4", "ROE": 12.3}])
+    def fake_stock_indicators(symbol):
+        captured["symbol"] = symbol
+        return FetchResult(
+            data=pd.DataFrame([{"报告期": "2025Q4", "ROE": 12.3}]),
+            source="AkshareFetcher",
+            fetched_at=datetime.now(timezone.utc),
+        )
 
-    monkeypatch.setattr(info_module, "get_data_manager", lambda: type("Manager", (), {"fetch_akshare": staticmethod(fake_ak_cache)})())
+    monkeypatch.setattr(
+        info_module,
+        "get_default_client",
+        lambda: type("Client", (), {"stock_indicators": staticmethod(fake_stock_indicators)})(),
+    )
 
     result = info_module.stock_indicators(symbol="01810.HK", market="hk")
 
@@ -148,11 +156,19 @@ def test_akshare_fetcher_hk_realtime_accepts_hk_suffix(monkeypatch):
 def test_stock_info_normalizes_hk_suffix_input(monkeypatch):
     captured = {}
 
-    def fake_ak_cache(func, *args, **kwargs):
-        captured["symbol"] = kwargs.get("symbol")
-        return pd.DataFrame([{"item": "总市值", "value": "1000亿"}])
+    def fake_stock_info(symbol):
+        captured["symbol"] = symbol
+        return FetchResult(
+            data=pd.DataFrame([{"item": "总市值", "value": "1000亿"}]),
+            source="AkshareFetcher",
+            fetched_at=datetime.now(timezone.utc),
+        )
 
-    monkeypatch.setattr(info_module, "get_data_manager", lambda: type("Manager", (), {"fetch_akshare": staticmethod(fake_ak_cache)})())
+    monkeypatch.setattr(
+        info_module,
+        "get_default_client",
+        lambda: type("Client", (), {"stock_info": staticmethod(fake_stock_info)})(),
+    )
 
     result = info_module.stock_info(symbol="01810.HK", market="hk")
 

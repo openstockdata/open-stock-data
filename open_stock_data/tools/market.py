@@ -6,7 +6,6 @@
 
 import os
 import re
-import json
 import logging
 import pandas as pd
 from pydantic import Field
@@ -17,6 +16,8 @@ from ..utils import (
     USER_AGENT,
     resolve_field,
 )
+from ..client import get_default_client
+from ..exceptions import AllSourcesFailed
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,23 +35,28 @@ def stock_news(
     try:
         symbol = resolve_field(symbol, "")
         limit = resolve_field(limit, 15)
-        result = get_data_manager().fetch_with_cache(
-            _stock_news_em,
-            symbol=symbol,
-            ttl=3600,
-            key=f"stock_news_em:{symbol}",
-            namespace="general",
-        )
-        if result is None or (hasattr(result, 'empty') and result.empty):
+        fetch = get_default_client().news(symbol, limit)
+        raw = fetch.data
+        if raw is None or (hasattr(raw, 'empty') and raw.empty):
             return f"未找到 {symbol} 相关新闻"
 
-        # 转换为 CSV 格式
-        news_df = result[['date', '新闻内容']].head(limit).copy()
-        news_df.columns = ['时间', '内容']
+        # 清洗 + 组装新闻内容（剥离 em 标签；截断内容回退标题）
+        titles = raw.get("title", pd.Series([""] * len(raw), index=raw.index)).map(_clean_em_news_text)
+        contents = raw.get("content", pd.Series([""] * len(raw), index=raw.index)).map(_clean_em_news_text)
+        composed = [
+            _compose_em_news_content(title, content, symbol)
+            for title, content in zip(titles, contents)
+        ]
+        news_df = pd.DataFrame({
+            "时间": raw.get("date", pd.Series([""] * len(raw), index=raw.index)),
+            "内容": composed,
+        }).head(limit)
 
-        lines = [f"# {symbol} 相关新闻", f"# 数据来源: 东方财经"]
+        lines = [f"# {symbol} 相关新闻", "# 数据来源: 东方财经"]
         lines.append(news_df.to_csv(index=False).strip())
         return "\n".join(lines)
+    except AllSourcesFailed:
+        return f"未找到 {symbol} 相关新闻"
     except Exception as e:
         _LOGGER.warning(f"获取新闻失败: {e}")
         return f"获取 {symbol} 新闻失败: {e}"
@@ -97,44 +103,6 @@ def _compose_em_news_content(title, content, symbol):
     if content in title:
         return title
     return f"{title}。{content}"
-
-
-
-def _stock_news_em(symbol, limit=20):
-    """从东方财富获取个股新闻"""
-    cbk = "jQuery351013927587392975826_1763361926020"
-    resp = _http_session.get(
-        "https://search-api-web.eastmoney.com/search/jsonp",
-        headers={
-            "User-Agent": USER_AGENT,
-            "Referer": f"https://so.eastmoney.com/news/s?keyword={symbol}",
-        },
-        params={
-            "cb": cbk,
-            "param": '{"uid":"",'
-                     f'"keyword":"{symbol}",'
-                     '"type":["cmsArticleWebOld"],"client":"web","clientType":"web","clientVersion":"curr",'
-                     '"param":{"cmsArticleWebOld":{"searchScope":"default","sort":"default","pageIndex":1,"pageSize":10,'
-                     '"preTag":"<em>","postTag":"</em>"}}}',
-        },
-        timeout=20,
-    )
-    text = resp.text.replace(cbk, "").strip().strip("()")
-    _LOGGER.debug(f"东方财富获取个股新闻: {text}")
-    data = json.loads(text) or {}
-    dfs = pd.DataFrame(data.get("result", {}).get("cmsArticleWebOld") or [])
-    if dfs.empty:
-        return dfs
-    if "date" in dfs.columns:
-        dfs.sort_values("date", ascending=False, inplace=True)
-    dfs = dfs.head(limit)
-    titles = dfs.get("title", pd.Series([""] * len(dfs), index=dfs.index)).map(_clean_em_news_text)
-    contents = dfs.get("content", pd.Series([""] * len(dfs), index=dfs.index)).map(_clean_em_news_text)
-    dfs["新闻内容"] = [
-        _compose_em_news_content(title, content, symbol)
-        for title, content in zip(titles, contents)
-    ]
-    return dfs
 
 
 # ==================== 全球财经快讯 ====================
@@ -232,8 +200,8 @@ def _pick_sina_news_content(row):
     return ""
 
 
-def _sina_global_news(ak_module):
-    dfs = ak_module.stock_info_global_sina()
+def _sina_global_news(dfs):
+    """从新浪快讯原帧中挑选时间/内容列（输入为 client.news_global() 的返回帧）。"""
     if dfs is None or (hasattr(dfs, "empty") and dfs.empty):
         return []
 
@@ -257,11 +225,10 @@ def stock_news_global():
     lines = ["# 全球财经快讯", "# 数据来源: 新浪财经, NewsNow"]
     news_rows = []
 
-    # 获取新浪财经快讯
+    # 获取新浪财经快讯（client 路由）
     try:
-        import akshare as ak
-
-        news_rows.extend(_sina_global_news(ak))
+        sina = get_default_client().news_global()
+        news_rows.extend(_sina_global_news(sina.data))
     except Exception as e:
         _LOGGER.debug(f"获取新浪财经快讯失败: {e}")
 

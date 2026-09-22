@@ -6,12 +6,10 @@ A股估值与财务模块
 
 import logging
 import pandas as pd
-import akshare as ak
 from datetime import datetime
 from pydantic import Field
 
 from ...utils import (
-    get_data_manager,
     format_source_name,
     field_symbol,
     recent_trade_date,
@@ -26,18 +24,23 @@ _LOGGER = logging.getLogger(__name__)
 
 def stock_market_pe_percentile():
     try:
-        manager = get_data_manager()
-        pe_df = manager.fetch_akshare(ak.stock_a_ttm_lyr, ttl=43200)
-        pb_df = manager.fetch_akshare(ak.stock_a_all_pb, ttl=43200)
+        result = get_default_client().market_pe_percentile()
+        pe_df = result.data
 
         if pe_df is None or pe_df.empty:
             return "获取市场PE数据失败"
 
-        latest_pe = pe_df.iloc[-1]
-        pe_ttm_median = latest_pe.get("middlePETTM", None)
-        pe_ttm_avg = latest_pe.get("averagePETTM", None)
-        pe_percentile_all = latest_pe.get("quantileInAllHistoryMiddlePeTtm", None)
-        pe_percentile_10y = latest_pe.get("quantileInRecent10YearsMiddlePeTtm", None)
+        def _last(col: str):
+            """从合并帧中取该列最后一个非空值（PE/PB 两帧 outer join 后末行可能单边缺失）。"""
+            if col not in pe_df.columns:
+                return None
+            s = pe_df[col].dropna()
+            return s.iloc[-1] if len(s) else None
+
+        pe_ttm_median = _last("middlePETTM")
+        pe_ttm_avg = _last("averagePETTM")
+        pe_percentile_all = _last("quantileInAllHistoryMiddlePeTtm")
+        pe_percentile_10y = _last("quantileInRecent10YearsMiddlePeTtm")
 
         lines = [
             "# A股市场估值分位",
@@ -61,13 +64,11 @@ def stock_market_pe_percentile():
         lines.append(",".join(pe_header))
         lines.extend([",".join(row) for row in pe_rows])
 
-        # 市净率数据表
-        if pb_df is not None and not pb_df.empty:
-            latest_pb = pb_df.iloc[-1]
-            pb_median = latest_pb.get("middlePB", None)
-            pb_percentile_all = latest_pb.get("quantileInAllHistoryMiddlePB", None)
-            pb_percentile_10y = latest_pb.get("quantileInRecent10YearsMiddlePB", None)
-
+        # 市净率数据表（client 返回 PE+PB 合并帧，从同帧取 PB 列）
+        pb_median = _last("middlePB")
+        pb_percentile_all = _last("quantileInAllHistoryMiddlePB")
+        pb_percentile_10y = _last("quantileInRecent10YearsMiddlePB")
+        if pb_median is not None or pb_percentile_all is not None or pb_percentile_10y is not None:
             lines.append("# 市净率(PB)")
             pb_header = ["指标", "值", "估值水平"]
             pb_rows = []
@@ -254,12 +255,7 @@ def stock_earnings_calendar(
             else:
                 period = f"{year}年报"
 
-        df = get_data_manager().fetch_akshare(
-            ak.stock_report_disclosure,
-            market="沪深京",
-            period=period,
-            ttl=43200,
-        )
+        df = get_default_client().earnings_calendar(period).data
         if df is None or df.empty:
             return f"未获取到财报披露数据，报告期: {period}"
 
@@ -296,12 +292,8 @@ def stock_financial_compare(
 ):
     try:
         symbol = resolve_field(symbol, "")
-        df = get_data_manager().fetch_akshare(
-            ak.stock_financial_analysis_indicator,
-            symbol=symbol,
-            start_year=str(datetime.now().year - 2),
-            ttl=86400 * 7,
-        )
+        result = get_default_client().financial_compare(symbol)
+        df = result.data
         if df is None or df.empty:
             return f"未获取到 {symbol} 的财务指标数据"
 

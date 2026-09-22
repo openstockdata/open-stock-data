@@ -369,6 +369,147 @@ class OpenStockDataClient:
             )
         )
 
+    # ==================== 市场概览（Akshare 独有）=======
+
+    def market_pe_percentile(self) -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(Operation.MARKET_PE_PERCENTILE, None, cache_key="market_pe")
+        )
+
+    def earnings_calendar(self, period: str = "") -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(Operation.EARNINGS_CALENDAR, None, args=(period,), cache_key=f"earnings_cal:{period}")
+        )
+
+    def financial_compare(self, symbol: str) -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(Operation.FINANCIAL_COMPARE, None, args=(symbol,), cache_key=symbol)
+        )
+
+    def stock_info(self, symbol: str) -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(Operation.STOCK_INFO, None, args=(symbol,), cache_key=symbol)
+        )
+
+    def stock_indicators(self, symbol: str) -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(Operation.STOCK_INDICATORS, None, args=(symbol,), cache_key=symbol)
+        )
+
+    def current_time(self) -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(Operation.CURRENT_TIME, None, cache_key="current_time")
+        )
+
+    def zt_pool(self, pool_type: str = "涨停", date: str = "") -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(
+                Operation.ZT_POOL,
+                None,
+                args=(pool_type, date),
+                cache_key=f"zt_pool:{pool_type}:{date or 'latest'}",
+            )
+        )
+
+    def north_flow(self, indicator: str = "北向资金") -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(Operation.NORTH_FLOW, None, args=(indicator,), cache_key="north_flow")
+        )
+
+    def sector_fund_flow_rank(self, days: str = "今日", cate: str = "行业资金流") -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(Operation.SECTOR_FUND_FLOW_RANK, None, args=(days, cate), cache_key=f"sector_ff:{days}:{cate}")
+        )
+
+    def block_trade(self, symbol: str = "", limit: int = 10) -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(Operation.BLOCK_TRADE, None, args=(symbol, limit), cache_key=f"block_trade:{symbol}")
+        )
+
+    def holder_num(self, symbol: str = "") -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(Operation.HOLDER_NUM, None, args=(symbol,), cache_key=f"holder_num:{symbol}")
+        )
+
+    def locked_shares(self, mode: str = "detail", limit: int = 20) -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(Operation.LOCKED_SHARES, None, args=(mode, limit), cache_key=f"locked_shares:{mode}")
+        )
+
+    def pledge_ratio(self, mode: str = "industry", limit: int = 20) -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(Operation.PLEDGE_RATIO, None, args=(mode, limit), cache_key=f"pledge_ratio:{mode}")
+        )
+
+    def news(self, symbol: str = "", limit: int = 15) -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(Operation.NEWS, None, args=(symbol, limit), cache_key=f"news:{symbol}:{limit}")
+        )
+
+    def news_global(self) -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(Operation.NEWS_GLOBAL, None, cache_key="news_global")
+        )
+
+    def margin_trading(self, symbol: str = "", market: str = "sh") -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(
+                Operation.MARGIN_TRADING,
+                None,
+                args=(symbol, market),
+                cache_key=f"margin:{symbol or 'market'}:{market}",
+            )
+        )
+
+    def index_daily(
+        self, symbol: str, period: str = "daily", days: int = 30
+    ) -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(
+                Operation.INDEX_DAILY,
+                None,
+                args=(symbol, period, days),
+                cache_key=f"{symbol}:{period}:{days}",
+            )
+        )
+
+    # ==================== 盘口 / 业绩 / 分红 / 新闻联播 ====================
+
+    def bid_ask(self, symbol: str) -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(Operation.BID_ASK, None, args=(symbol,), cache_key=symbol)
+        )
+
+    def cctv_news(self, date: str = "") -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(Operation.CCTV_NEWS, None, args=(date,), cache_key=f"cctv:{date or 'latest'}")
+        )
+
+    def earnings_forecast(self, symbol: str) -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(Operation.EARNINGS_FORECAST, None, args=(symbol,), cache_key=symbol)
+        )
+
+    def earnings_report(self, symbol: str) -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(Operation.EARNINGS_REPORT, None, args=(symbol,), cache_key=symbol)
+        )
+
+    def earnings_express(self, symbol: str) -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(Operation.EARNINGS_EXPRESS, None, args=(symbol,), cache_key=symbol)
+        )
+
+    def dividend_plan(self, symbol: str) -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(Operation.DIVIDEND_PLAN, None, args=(symbol,), cache_key=symbol)
+        )
+
+    def dividend_cninfo(self, symbol: str) -> FetchResult[pd.DataFrame]:
+        return self._executor.execute(
+            RouteRequest(Operation.DIVIDEND_CNINFO, None, args=(symbol,), cache_key=symbol)
+        )
+
     @staticmethod
     def _resample_prices(data: pd.DataFrame, period: str) -> pd.DataFrame:
         if data.empty:

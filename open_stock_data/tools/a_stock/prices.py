@@ -6,12 +6,10 @@ A股价格与行情模块
 
 import logging
 import pandas as pd
-import akshare as ak
 from datetime import datetime, timedelta
 from pydantic import Field
 
 from ...utils import (
-    get_data_manager,
     format_source_name,
     field_symbol,
     field_market,
@@ -91,7 +89,10 @@ def _index_hist_sina(symbol: str, start_date: str, period: str) -> pd.DataFrame 
         return None
     dfs["日期"] = pd.to_datetime(dfs["日期"], errors="coerce")
     dfs = dfs.dropna(subset=["日期"]).sort_values("日期")
-    dfs = dfs[dfs["日期"] >= pd.to_datetime(start_date, format="%Y%m%d", errors="coerce")].copy()
+    if start_date:
+        start_ts = pd.to_datetime(start_date, format="%Y%m%d", errors="coerce")
+        if pd.notna(start_ts):
+            dfs = dfs[dfs["日期"] >= start_ts].copy()
     if dfs.empty:
         return None
 
@@ -114,25 +115,16 @@ def index_prices(
     period = resolve_field(period, "daily")
     limit = resolve_field(limit, 30)
 
-    delta = {"weeks": limit + 62} if period == "weekly" else {"days": limit + 62}
-    start_date = (datetime.now() - timedelta(**delta)).strftime("%Y%m%d")
-    end_date = datetime.now().strftime("%Y%m%d")
-
     try:
-        dfs = get_data_manager().fetch_akshare(
-            ak.index_zh_a_hist,
-            symbol=symbol,
-            period=period,
-            start_date=start_date,
-            end_date=end_date,
-            ttl=86400,
-        )
+        result = get_default_client().index_daily(symbol, period=period, days=limit)
+        dfs = result.data
+        source = f"client ({format_source_name(result.source)})"
     except Exception:
         dfs = None
+        source = ""
 
-    source = "akshare (eastmoney)"
     if dfs is None or dfs.empty:
-        dfs = _index_hist_sina(symbol, start_date, period)
+        dfs = _index_hist_sina(symbol, "", period)
         source = "akshare (sina)"
 
     if dfs is None or dfs.empty:

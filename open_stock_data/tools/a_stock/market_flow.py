@@ -25,17 +25,6 @@ from ...exceptions import AllSourcesFailed
 _LOGGER = logging.getLogger(__name__)
 
 
-def _fetch_sector_fund_flow_rank(indicator: str, sector_type: str):
-    return fetch_with_retry(
-        ak.stock_sector_fund_flow_rank,
-        max_retries=2,
-        delay=2.0,
-        initial_delay=0.5,
-        indicator=indicator,
-        sector_type=sector_type,
-    )
-
-
 def _fetch_board_industry_name():
     return fetch_with_retry(
         ak.stock_board_industry_name_em,
@@ -77,20 +66,9 @@ def stock_zt_pool(
         date = recent_trade_date().strftime("%Y%m%d")
 
     try:
-        manager = get_data_manager()
-        if pool_type == "强势":
-            dfs = manager.fetch_akshare(ak.stock_zt_pool_strong_em, date=date, ttl=1200)
-            title = "强势股池"
-        elif pool_type == "跌停":
-            dfs = manager.fetch_akshare(ak.stock_zt_pool_dtgc_em, date=date, ttl=1200)
-            title = "跌停股池"
-        elif pool_type == "昨日涨停":
-            dfs = manager.fetch_akshare(ak.stock_zt_pool_zbgc_em, date=date, ttl=1200)
-            title = "昨日涨停股今日表现"
-        else:
-            dfs = manager.fetch_akshare(ak.stock_zt_pool_em, date=date, ttl=1200)
-            title = "涨停股池"
-
+        result = get_default_client().zt_pool(pool_type, date)
+        dfs = result.data
+        title = {"涨停": "涨停股池", "强势": "强势股池", "跌停": "跌停股池", "昨日涨停": "昨日涨停股今日表现"}.get(pool_type, "股池")
         if dfs is None or dfs.empty:
             return f"获取{title}数据失败"
 
@@ -133,22 +111,16 @@ def stock_sector_fund_flow_rank(
 ):
     days = resolve_field(days, "今日")
     cate = resolve_field(cate, "行业资金流")
-    primary_ttl = 600 if days == "今日" else 3600
-    # 主数据源：东方财富板块资金流
+    # 主数据源：东方财富板块资金流（经 client 路由）
     try:
-        dfs = get_data_manager().fetch_with_cache(
-            _fetch_sector_fund_flow_rank,
-            days,
-            cate,
-            ttl=primary_ttl,
-            key=f"stock_sector_fund_flow_rank:{days}:{cate}",
-        )
+        result = get_default_client().sector_fund_flow_rank(days, cate)
+        dfs = result.data
         if dfs is not None and not dfs.empty:
             if "今日涨跌幅" in dfs.columns:
                 dfs.sort_values("今日涨跌幅", ascending=False, inplace=True)
             dfs.drop(columns=["序号"], inplace=True, errors='ignore')
             dfs = pd.concat([dfs.head(20), dfs.tail(20)])
-            lines = [f"# {cate}", f"# 数据来源: {get_akshare_source(ak.stock_sector_fund_flow_rank)}"]
+            lines = [f"# {cate}", f"# 数据来源: {format_source_name(result.source)}"]
             lines.append(dfs.to_csv(index=False, float_format="%.2f").strip())
             return "\n".join(lines)
     except Exception as e:
@@ -212,7 +184,8 @@ def stock_north_flow(
 ):
     indicator = resolve_field(indicator, "北向资金")
     try:
-        df = get_data_manager().fetch_akshare(ak.stock_hsgt_fund_flow_summary_em, ttl=600)
+        result = get_default_client().north_flow(indicator)
+        df = result.data
         if df is None or df.empty:
             return "获取北向资金数据失败"
 
@@ -233,7 +206,7 @@ def stock_north_flow(
                 df = df[["日期", "净流入(亿)"]].copy()
 
         df = df.head(30)
-        lines = [f"# {indicator}流向", f"# 数据来源: akshare"]
+        lines = [f"# {indicator}流向", f"# 数据来源: {format_source_name(result.source)}"]
         lines.append(df.to_csv(index=False, float_format="%.2f").strip())
         return "\n".join(lines)
     except Exception as exc:
@@ -271,17 +244,15 @@ def stock_margin_trading(
                 lines.append(df.head(limit).to_csv(index=False, float_format="%.2f").strip())
                 return "\n".join(lines)
         else:
-            if market == "sh":
-                df = get_data_manager().fetch_akshare(ak.stock_margin_sse, start_date="", end_date="", ttl=1800)
-            else:
-                df = get_data_manager().fetch_akshare(ak.stock_margin_szse, start_date="", end_date="", ttl=1800)
+            result = get_default_client().margin_trading("", market)
+            df = result.data
 
             if df is None or df.empty:
                 return f"获取{market}市场融资融券数据失败"
 
             market_name = "沪市" if market == "sh" else "深市"
             df = df.tail(limit)
-            lines = [f"# {market_name}融资融券", f"# 数据来源: akshare"]
+            lines = [f"# {market_name}融资融券", f"# 数据来源: {format_source_name(result.source)}"]
             lines.append(df.to_csv(index=False, float_format="%.2f").strip())
             return "\n".join(lines)
     except AllSourcesFailed:
@@ -305,13 +276,8 @@ def stock_block_trade(
 
         if isinstance(symbol, str) and symbol:
             # 获取 A 股大宗交易明细，按股票代码过滤
-            df = get_data_manager().fetch_akshare(
-                ak.stock_dzjy_mrmx,
-                symbol="A股",
-                start_date=start_date,
-                end_date=end_date,
-                ttl=1800,
-            )
+            result = get_default_client().block_trade(symbol, limit)
+            df = result.data
             if df is not None and not df.empty:
                 code_col = next((c for c in df.columns if "代码" in c), None)
                 if code_col:
@@ -322,12 +288,8 @@ def stock_block_trade(
                     return "\n".join(lines)
             return f"未找到股票 {symbol} 的大宗交易数据"
         else:
-            df = get_data_manager().fetch_akshare(
-                ak.stock_dzjy_mrtj,
-                start_date=start_date,
-                end_date=end_date,
-                ttl=1800,
-            )
+            result = get_default_client().block_trade(limit=limit)
+            df = result.data
             if df is None or df.empty:
                 return "获取大宗交易数据失败"
             df = df.head(limit)
@@ -345,11 +307,8 @@ def stock_holder_num(
 ):
     symbol = resolve_field(symbol, "")
     try:
-        df = get_data_manager().fetch_akshare(
-            ak.stock_zh_a_gdhs_detail_em,
-            symbol=symbol,
-            ttl=86400,
-        )
+        result = get_default_client().holder_num(symbol)
+        df = result.data
         if df is not None and not df.empty:
             lines = [f"# {symbol} 股东人数", f"# 数据来源: akshare"]
             lines.append(df.to_csv(index=False, float_format="%.2f").strip())
